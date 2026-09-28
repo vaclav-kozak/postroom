@@ -69,6 +69,7 @@ ACCESS_LEVELS = [
     (MailAccess.FULL.value, "Full", "Also send mail (needs an outgoing mail server)."),
 ]
 DEFAULT_SMTP_PORTS = {"ssl": "465", "starttls": "587"}
+SERVER_CHANGED = "Re-enter the password when changing a server address."
 
 
 def _host_ok(host: str) -> bool:
@@ -91,6 +92,26 @@ def _dav_url_ok(url: str) -> bool:
     return parts.scheme == "https" or (
         parts.scheme == "http" and host in ("localhost", "127.0.0.1", "::1")
     )
+
+
+def _url_host(url: str | None) -> str:
+    try:
+        return (urlparse(url or "").hostname or "").lower()
+    except ValueError:
+        return ""
+
+
+def _server_changed(f: AccountForm, account: Account) -> bool:
+    """True when the form points the account at a server host it did not use before (the
+    IMAP host, the SMTP host, or the host of a CalDAV or CardDAV URL, including one that is
+    new): the stored password must not go to a server without the owner typing it again."""
+    pairs = (
+        (f.imap_host, account.imap_host),
+        (f.smtp_host, account.smtp_host),
+        (_url_host(f.caldav_url), _url_host(account.caldav_url)),
+        (_url_host(f.carddav_url), _url_host(account.carddav_url)),
+    )
+    return any(new and new.lower() != (old or "").lower() for new, old in pairs)
 
 
 @dataclass
@@ -430,6 +451,8 @@ def register_admin(mcp: FastMCP, services: Services) -> None:
         if error:
             return form_page(request, f, account, error, 400)
         if not password:
+            if _server_changed(f, account):
+                return form_page(request, f, account, SERVER_CHANGED, 400)
             try:
                 password = services.repo.get_secret(account.email) or ""
             except SecretError:

@@ -73,6 +73,9 @@ Postroom is its own authorization server, so no third party is involved in grant
 - **Losing the master key** makes the stored secrets unreadable. There is no recovery and
   no key rotation command: with a new key you re-enter every password and reconnect every
   Google account.
+- Editing an account reuses its stored password only while its servers stay the same. A new
+  IMAP host, SMTP host or CalDAV/CardDAV host needs the password typed again, so an admin
+  session alone cannot send a stored password to another server.
 - Google access tokens are kept in memory only.
 - Secrets never appear in logs or error messages. The server keeps no HTTP access log,
   because query strings can carry one-time OAuth codes. Unexpected errors reach MCP clients

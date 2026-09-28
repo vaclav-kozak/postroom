@@ -502,3 +502,64 @@ async def test_google_exchange_error_is_shown_escaped(owner, services):
     r = await owner.get("/admin/google/callback", params={"code": "abc", "state": state})
     assert r.status_code == 400 and "invalid_grant" in r.text
     assert "gsecret" not in r.text and services.repo.list() == []
+
+
+@pytest.mark.parametrize(
+    "change",
+    [
+        {"imap_host": "imap.attacker.example"},
+        {"smtp_host": "smtp.attacker.example", "smtp_port": "465", "smtp_security": "ssl"},
+        {"caldav_url": "https://dav.attacker.example/cal/"},
+        {"carddav_url": "https://dav.attacker.example/card/"},
+    ],
+)
+async def test_edit_to_a_new_server_needs_the_password_again(
+    owner, app, services, imap_account, change
+):
+    r = await owner.post(
+        f"/admin/accounts/{imap_account.id}",
+        data={**form(email="d@x.cz", password=""), **change, "csrf": owner.token},
+    )
+    assert r.status_code == 400
+    assert "Re-enter the password when changing a server address." in r.text
+    assert app.state.attempts == []  # the stored password went nowhere
+    a = services.repo.get("d@x.cz")
+    assert a.imap_host == "imap.x.cz" and a.smtp_host is None and a.caldav_url is None
+
+
+async def test_edit_to_a_new_server_with_the_password_typed_is_saved(
+    owner, app, services, imap_account
+):
+    r = await owner.post(
+        f"/admin/accounts/{imap_account.id}",
+        data={**form(email="d@x.cz", imap_host="imap2.x.cz"), "csrf": owner.token},
+    )
+    assert r.status_code == 303 and "account_updated" in r.headers["location"]
+    assert app.state.attempts == [("d@x.cz", "good")]
+    assert services.repo.get("d@x.cz").imap_host == "imap2.x.cz"
+
+
+async def test_edit_keeps_the_stored_password_for_the_same_servers(
+    owner, app, services, imap_account
+):
+    services.repo.upsert(
+        email="d@x.cz",
+        provider=Provider.IMAP,
+        imap_host="imap.x.cz",
+        imap_port=993,
+        imap_security="ssl",
+        caldav_url="https://dav.x.cz/cal/",
+        carddav_url="https://dav.x.cz/card/",
+    )
+    data = form(
+        email="d@x.cz",
+        password="",
+        imap_host="IMAP.x.cz",
+        imap_port="143",
+        imap_security="starttls",
+        caldav_url="https://DAV.x.cz/other/path/",
+        carddav_url="",  # removing a server is fine
+    )
+    r = await owner.post(f"/admin/accounts/{imap_account.id}", data={**data, "csrf": owner.token})
+    assert r.status_code == 303, r.text
+    assert app.state.attempts == [("d@x.cz", "good")]

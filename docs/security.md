@@ -91,9 +91,11 @@ Postroom is its own authorization server, so no third party is involved in grant
   before the password is decrypted. DAV credentials are sent only to the configured host:
   a calendar id is used only after it matches one of the account's discovered calendars,
   and CardDAV links to other hosts are ignored.
-- **No permanent deletion.** There is no tool that expunges mail. `trash_emails` moves to
+- **No permanent deletion.** No tool deletes mail permanently. `trash_emails` moves to
   Trash; a move uses `MOVE`, or `COPY` plus `UID EXPUNGE` of exactly the moved messages,
-  never a folder-wide `EXPUNGE`, and refuses servers that support neither.
+  never a folder-wide `EXPUNGE`, and refuses servers that support neither. The one
+  exception is the draft `send_draft` has just sent: it is removed with `UID EXPUNGE` of
+  that one message (or moved to Trash, or left in place when the server can do neither).
 - **fail2ban safety.** One failed IMAP, CalDAV or CardDAV login marks the account
   "Login failed", and Postroom does not log in again until the owner fixes it or presses
   **Test now**. A password rejected by the SMTP server (a 5xx reply) pauses sending from
@@ -128,7 +130,8 @@ Postroom is its own authorization server, so no third party is involved in grant
   server supports keywords) and the error says not to retry automatically.
 - **`send_draft`** sends only messages with the `\Draft` flag whose `From` (and `Sender`,
   if present) is one of the account's own addresses, so a message planted in Drafts by
-  someone else cannot be sent as is. Concurrent calls for one draft send it once.
+  someone else cannot be sent as is. Concurrent calls for one draft send it once. After
+  the send, that draft (and only that one) is removed from its folder.
 - Inline attachments on `send_email` are limited to 2 MiB in total (decoded).
   `forward_email` re-attaches at most 10 MiB, and `send_draft` sends drafts of up to
   10 MiB.

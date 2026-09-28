@@ -4,7 +4,8 @@
 The read tools never change anything (an email is not even marked read). `create_draft`
 only saves a draft in the Drafts folder. The organising tools work only on accounts whose
 mail access level is "organize" or "full" (set by the owner per account); trash moves to
-the Trash folder, and nothing is ever deleted permanently. The sending tools work only on
+the Trash folder. No tool deletes mail permanently: send_draft removes only the draft it
+has just sent. The sending tools work only on
 accounts with access level "full" and an outgoing (SMTP) server; they send immediately and
 are never retried automatically, so a send is never duplicated by the server.
 
@@ -467,7 +468,7 @@ def register_mail_tools(mcp: FastMCP, repo: AccountRepo, mail: MailService) -> N
 
     @mcp.tool(annotations=MOVES)
     async def trash_emails(emails: EmailRefs) -> dict:
-        """Move emails to their account's Trash folder. Nothing is deleted permanently;
+        """Move emails to their account's Trash folder. It never deletes permanently;
         emails already in Trash are left there (reported as skipped).
 
         emails: one or more {account, folder, uid}; search_emails results can be passed

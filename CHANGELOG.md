@@ -21,8 +21,9 @@ First public release.
   Gmail), `get_email`, `get_thread`, `get_attachment` (text, PDF text, images) and
   `create_draft` (including threaded replies).
 - **Organising mail:** `mark_emails`, `move_emails` (Gmail-aware archive), `trash_emails`
-  and `create_folder`, in batches of up to 500 emails across accounts. Nothing is ever
-  deleted permanently.
+  and `create_folder`, in batches of up to 500 emails across accounts. No tool deletes
+  mail permanently: `trash_emails` moves to Trash, and `send_draft` removes only the draft
+  it just sent.
 - **Sending mail** over SMTP (or Gmail with OAuth): `send_email` (with reply, reply-all and
   up to 2 MiB of attachments), `forward_email` and `send_draft`, with a copy in Sent, a
   per-account hourly limit (`POSTROOM_SEND_LIMIT_PER_HOUR`), a duplicate-send guard

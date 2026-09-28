@@ -1646,7 +1646,7 @@ class MailService:
 
     async def trash(self, refs: list[MessageRef]) -> BatchResult:
         """Move emails to each account's Trash. Emails already there are left alone:
-        nothing is ever deleted permanently."""
+        trash never deletes permanently."""
         return await self.move(refs, "trash", skip_reason="already in trash")
 
     async def create_folder(self, email: str, name: str, parent: str | None = None) -> str:

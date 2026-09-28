@@ -51,9 +51,10 @@ assistant may change.
   encrypted at rest with a key that never enters the database.
 - **Safe by design.** Reading comes first, and a draft for you to review is the default
   way to compose. Each mailbox has an access level (read, organize or full), and sending
-  is off until you turn it on for an account. Nothing is ever deleted permanently, the
-  calendar tools never invite anyone, and every tool carries MCP annotations, so clients
-  ask before a destructive action.
+  is off until you turn it on for an account. No tool deletes mail permanently
+  (`trash_emails` moves to Trash, and `send_draft` removes only the draft it just sent),
+  the calendar tools never invite anyone, and every tool carries MCP annotations, so
+  clients ask before a destructive action.
 
 ## Features
 
@@ -118,7 +119,7 @@ CalDAV/CardDAV URLs are set.
 | `create_draft` | Saves a new email or a threaded reply in the Drafts folder. Sends nothing. | read |
 | `mark_emails` | Marks emails read or unread, flagged or unflagged. | organize |
 | `move_emails` | Moves emails to another folder or an alias (`inbox`, `archive`, `junk`, `trash`, `all`). | organize |
-| `trash_emails` | Moves emails to Trash. Nothing is deleted permanently. | organize |
+| `trash_emails` | Moves emails to Trash. It never deletes permanently. | organize |
 | `create_folder` | Creates a folder, optionally inside another one. | organize |
 | `send_email` | Sends a new email, reply or reply-all immediately, with optional attachments (up to 2 MiB). Takes `allow_duplicate`. | full + SMTP |
 | `forward_email` | Forwards an email immediately, with its attachments unless told not to. Takes `allow_duplicate`. | full + SMTP |

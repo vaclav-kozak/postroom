@@ -1,7 +1,8 @@
-"""Static guard: the package must never delete mail permanently, SMTP lives only in the
-SMTP client module (behind the "full" access level, checked by the mail service), and the
-IMAP writes that organise mail (flags, move, trash, create folder) live only in the mail
-service, behind the per-account access level."""
+"""Static guard: the package never expunges a whole folder (only UID EXPUNGE of named
+messages, in the mail service), SMTP lives only in the SMTP client module (behind the
+"full" access level, checked by the mail service), and the IMAP writes that organise mail
+(flags, move, trash, create folder) live only in the mail service, behind the per-account
+access level."""
 
 import pathlib
 import re

@@ -482,7 +482,7 @@ async def test_trash_skips_what_is_already_in_trash(repo, accounts):
     ]
     assert f.ops("move") == [("move", [1], "Trash")]
     assert ("select", "Trash", False) not in f.calls
-    assert 50 in f.boxes["Trash"]  # nothing is ever deleted permanently
+    assert 50 in f.boxes["Trash"]  # trash never deletes permanently
 
 
 async def test_gmail_trash(repo, accounts):

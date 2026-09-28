@@ -1,0 +1,28 @@
+# Caddy in front of Postroom (used by docker-compose.yml).
+# Automatic HTTPS: Caddy obtains and renews a Let's Encrypt certificate for POSTROOM_DOMAIN
+# (ports 80 and 443 must be reachable). POSTROOM_PUBLIC_URL must be https://POSTROOM_DOMAIN.
+#
+# Caddy has no built-in rate limiting; Postroom rate-limits its login and OAuth endpoints
+# itself (POSTROOM_AUTH_RATE_LIMIT_PER_MINUTE).
+#
+# No access log on purpose: query strings can carry one-time OAuth codes.
+
+{$POSTROOM_DOMAIN} {
+	request_body {
+		max_size 1MB
+	}
+
+	header {
+		Strict-Transport-Security "max-age=31536000"
+		-Server
+		# Deferred, so it replaces the app's own copy instead of adding a second one.
+		>X-Robots-Tag "noindex, nofollow, noarchive"
+	}
+
+	reverse_proxy postroom:8000 {
+		# Caddy replaces client-supplied X-Forwarded-For/-Proto; set X-Real-IP the same way.
+		header_up X-Real-IP {remote_host}
+		# MCP Streamable HTTP responses may stream: pass bytes on immediately.
+		flush_interval -1
+	}
+}

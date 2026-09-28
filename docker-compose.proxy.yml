@@ -1,0 +1,55 @@
+# Postroom without a web server, for hosts that already run nginx, Traefik or Caddy.
+# Postroom listens on 127.0.0.1:${POSTROOM_PORT:-8000} only; point your reverse proxy at it
+# (example: deploy/nginx/postroom.conf.example). The proxy must terminate TLS and set
+# X-Forwarded-For (and preferably X-Real-IP and X-Forwarded-Proto).
+#
+#   cp .env.example .env          # then set POSTROOM_PUBLIC_URL
+#   docker compose --progress quiet -f docker-compose.proxy.yml run --rm --no-deps -T postroom \
+#     postroom gen-secrets --env-out /dev/stdout --password-out /dev/stderr \
+#     | grep '^POSTROOM_' >> .env  # the admin password is printed on the terminal: keep it
+#   docker compose -f docker-compose.proxy.yml up -d
+
+name: postroom
+
+services:
+  postroom:
+    image: ghcr.io/vaclav-kozak/postroom:${POSTROOM_VERSION:-latest}
+    # To build from this checkout instead of pulling the published image:
+    # build: .
+    restart: unless-stopped
+    env_file:
+      - path: .env
+        required: false
+    environment:
+      # A proxy on the host connects through the published port and appears as the docker
+      # bridge gateway (a private address); a proxy container on a shared network has a
+      # private address too. Narrow this if other untrusted containers share the network.
+      POSTROOM_TRUSTED_PROXIES: ${POSTROOM_TRUSTED_PROXIES:-10.0.0.0/8,172.16.0.0/12,192.168.0.0/16,fc00::/7}
+    ports:
+      - "127.0.0.1:${POSTROOM_PORT:-8000}:8000"
+    volumes:
+      - postroom-data:/data
+    read_only: true
+    tmpfs:
+      - /tmp:size=16m
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+    mem_limit: 256m
+    pids_limit: 128
+    logging:
+      driver: json-file
+      options:
+        max-size: 10m
+        max-file: "3"
+    # Reverse proxy in another compose project (e.g. an nginx container)? Join its network
+    # instead of publishing a port, and proxy_pass to http://postroom:8000:
+    # networks: [proxy]
+
+# networks:
+#   proxy:
+#     external: true
+#     name: my-proxy-network
+
+volumes:
+  # Postroom's SQLite database (accounts, encrypted secrets, OAuth clients). Back it up.
+  postroom-data:

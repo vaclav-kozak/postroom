@@ -1,3 +1,4 @@
+from ipaddress import IPv4Network, IPv6Network, ip_network
 from urllib.parse import urlparse
 
 from pydantic_settings import BaseSettings, SettingsConfigDict
@@ -18,11 +19,21 @@ class Settings(BaseSettings):
     # redirect URIs on.
     # Claude uses https://claude.ai/api/mcp/auth_callback and may move to claude.com.
     oauth_redirect_hosts: str = "claude.ai,claude.com"
+    # Per-client-IP limit for /login, /register, /authorize and /token (burst 10); 0 disables.
+    auth_rate_limit_per_minute: int = 10
+    # Comma-separated IPs/CIDRs of reverse proxies whose X-Forwarded-For / X-Real-IP /
+    # X-Forwarded-Proto headers are believed. From any other peer these headers are dropped.
+    trusted_proxies: str = "127.0.0.1,::1"
 
     @property
     def redirect_hosts(self) -> tuple[str, ...]:
         hosts = (h.strip().lower() for h in self.oauth_redirect_hosts.split(","))
         return tuple(h for h in hosts if h)
+
+    @property
+    def trusted_proxy_networks(self) -> tuple[IPv4Network | IPv6Network, ...]:
+        items = (p.strip() for p in self.trusted_proxies.split(","))
+        return tuple(ip_network(p, strict=False) for p in items if p)
 
     @property
     def base_url(self) -> str:

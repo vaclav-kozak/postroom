@@ -1,0 +1,103 @@
+# nginx in front of Postroom (docker-compose.proxy.yml publishes it on 127.0.0.1:8000).
+#
+# Copy to /etc/nginx/conf.d/postroom.conf (or sites-available/), replace mcp.example.com with
+# your domain, obtain a certificate (e.g. `certbot certonly --webroot -w /var/www/certbot
+# -d mcp.example.com`) and reload nginx. POSTROOM_PUBLIC_URL must be https://mcp.example.com.
+#
+# This file is included in the http {} context, so the rate-limit zone is declared here,
+# outside any server block. Rename the zone if another vhost already uses the name.
+# 10 requests/minute per client IP on the login and OAuth endpoints (Postroom enforces the
+# same limit itself; this stops floods before they reach the app).
+limit_req_zone $binary_remote_addr zone=postroom_auth:1m rate=10r/m;
+
+upstream postroom {
+    server 127.0.0.1:8000;
+    # nginx in a container on the same docker network instead: server postroom:8000;
+    keepalive 8;
+}
+
+server {
+    listen 80;
+    listen [::]:80;
+    server_name mcp.example.com;
+
+    location /.well-known/acme-challenge/ {
+        root /var/www/certbot;
+    }
+
+    location / {
+        return 301 https://$host$request_uri;
+    }
+}
+
+server {
+    listen 443 ssl;
+    listen [::]:443 ssl;
+    # http2 on;   # nginx >= 1.25.1
+    server_name mcp.example.com;
+
+    ssl_certificate     /etc/letsencrypt/live/mcp.example.com/fullchain.pem;
+    ssl_certificate_key /etc/letsencrypt/live/mcp.example.com/privkey.pem;
+    # Certbot's recommended TLS settings, if installed:
+    # include /etc/letsencrypt/options-ssl-nginx.conf;
+    # ssl_dhparam /etc/letsencrypt/ssl-dhparams.pem;
+
+    add_header Strict-Transport-Security "max-age=31536000" always;
+    add_header X-Robots-Tag "noindex, nofollow, noarchive" always;
+    # The app sets X-Robots-Tag too; hide it so the response carries the header once.
+    proxy_hide_header X-Robots-Tag;
+
+    client_max_body_size 1m;
+    limit_req_status 429;
+
+    # No access log: query strings can carry one-time OAuth codes.
+    access_log off;
+
+    proxy_http_version 1.1;
+    proxy_set_header Connection        "";
+    proxy_set_header Host              $host;
+    # nginx is the edge: overwrite (never append to) client-supplied forwarding headers.
+    # Postroom believes them only from POSTROOM_TRUSTED_PROXIES.
+    proxy_set_header X-Real-IP         $remote_addr;
+    proxy_set_header X-Forwarded-For   $remote_addr;
+    proxy_set_header X-Forwarded-Proto $scheme;
+    proxy_set_header X-Forwarded-Host  $host;
+    proxy_connect_timeout 30s;
+    proxy_read_timeout    60s;
+
+    # Owner login and the OAuth endpoints: rate-limited per client IP (brute force, dynamic
+    # client registration spam, global-lockout DoS). Excess requests get 429.
+    location = /login {
+        limit_req zone=postroom_auth burst=10 nodelay;
+        proxy_pass http://postroom;
+    }
+
+    location = /register {
+        limit_req zone=postroom_auth burst=10 nodelay;
+        proxy_pass http://postroom;
+    }
+
+    location = /authorize {
+        limit_req zone=postroom_auth burst=10 nodelay;
+        proxy_pass http://postroom;
+    }
+
+    location = /token {
+        limit_req zone=postroom_auth burst=10 nodelay;
+        proxy_pass http://postroom;
+    }
+
+    # MCP Streamable HTTP: responses may stream, and tool calls (e.g. reading a large
+    # mailbox) can take minutes.
+    location /mcp {
+        proxy_buffering off;
+        proxy_cache off;
+        proxy_read_timeout 300s;
+        proxy_send_timeout 300s;
+        proxy_pass http://postroom;
+    }
+
+    location / {
+        proxy_pass http://postroom;
+    }
+}

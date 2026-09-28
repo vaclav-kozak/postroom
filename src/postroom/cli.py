@@ -122,16 +122,15 @@ def _cmd_serve(args: argparse.Namespace) -> int:
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s %(message)s")
     for name in ("httpx", "httpcore", "imapclient"):
         logging.getLogger(name).setLevel(logging.WARNING)
-    # Client IPs come from nginx (X-Forwarded-For / X-Real-IP); the container has no
-    # published ports, so only the reverse proxy on the docker network can reach it.
+    # Uvicorn's proxy-header handling is off: the app's ClientAddressMiddleware believes
+    # X-Forwarded-For / X-Real-IP only from POSTROOM_TRUSTED_PROXIES.
     # The access log is off: query strings may contain one-time codes (e.g. Google's
     # OAuth callback `code`).
     uvicorn.run(
         create_app(),
         host=args.host,
         port=args.port,
-        proxy_headers=True,
-        forwarded_allow_ips="*",
+        proxy_headers=False,
         access_log=False,
         log_level="info",
     )

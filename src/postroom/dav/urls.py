@@ -1,6 +1,6 @@
 """Which CalDAV/CardDAV URLs may be given the mailbox password.
 
-Both backends send the account's IMAP/SOGo password (the full-access mailbox credential)
+Both backends send the account's IMAP password (the full-access mailbox credential)
 as HTTP Basic auth, so the URL must be https. Plain http is allowed only for loopback
 hosts (local test servers). Same rule as the admin form.
 """

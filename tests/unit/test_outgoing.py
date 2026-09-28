@@ -28,7 +28,7 @@ from postroom.mail.outgoing import (
     sanitize_filename,
     without_bcc,
 )
-from postroom.mail.parse import build_message
+from postroom.mail.parse import build_message, parse_message
 
 ME = "user@example.com"
 
@@ -135,19 +135,20 @@ def test_reply_goes_to_sender_or_reply_to():
     assert reply_recipients(original(), [], [], False, {ME}) == (
         ["Alice <alice@example.org>"],
         [],
+        [],
     )
-    to, _ = reply_recipients(original(reply_to=["list@example.org"]), [], [], False, {ME})
+    to, _, _ = reply_recipients(original(reply_to=["list@example.org"]), [], [], False, {ME})
     assert to == ["list@example.org"]
 
 
 def test_reply_all_adds_to_and_cc_without_own_addresses():
-    to, cc = reply_recipients(original(), [], [], True, {ME})
+    to, cc, _ = reply_recipients(original(), [], [], True, {ME})
     assert to == ["Alice <alice@example.org>"]
     assert cc == ["bob@example.org", "Carol <carol@example.org>"]
 
 
 def test_reply_all_keeps_explicit_recipients_and_dedupes():
-    to, cc = reply_recipients(
+    to, cc, _ = reply_recipients(
         original(), ["bob@example.org"], ["carol@example.org"], True, {ME.upper()}
     )
     assert to == ["bob@example.org"]
@@ -156,13 +157,34 @@ def test_reply_all_keeps_explicit_recipients_and_dedupes():
 
 def test_reply_all_to_own_email_goes_to_its_recipients():
     mine = original(from_=ME, to=["bob@example.org"], cc=["carol@example.org"])
-    to, cc = reply_recipients(mine, [], [], True, {ME})
+    to, cc, _ = reply_recipients(mine, [], [], True, {ME})
     assert to == ["bob@example.org"] and cc == ["carol@example.org"]
 
 
 def test_reply_all_skips_unusable_addresses_from_the_original():
-    _to, cc = reply_recipients(original(cc=["undisclosed-recipients:;"]), [], [], True, {ME})
+    _to, cc, dropped = reply_recipients(
+        original(cc=["undisclosed-recipients:;", "Mallory <not-an-address>"]), [], [], True, {ME}
+    )
     assert cc == ["bob@example.org"]
+    assert dropped == ["Mallory <not-an-address>"]  # reported; the group marker is not
+
+
+def test_reply_to_a_last_first_sender_keeps_the_address_whole():
+    raw = (
+        b'From: "Doe, John" <john@example.org>\r\n'
+        b'To: me@example.com, "Roe, Jane" <jane@example.org>\r\n'
+        b'Cc: "O\'Neil, \\"Pat\\"" <pat@example.org>\r\n'
+        b"Subject: Plans\r\nMessage-ID: <m1@example.org>\r\n\r\nHello\r\n"
+    )
+    parsed = parse_message(raw)
+    assert parsed.from_ == '"Doe, John" <john@example.org>'
+    to, cc, dropped = reply_recipients(parsed, [], [], True, {"me@example.com"})
+    assert dropped == []
+    recipients = collect_recipients(to, cc)
+    assert recipients.envelope == ["john@example.org", "jane@example.org", "pat@example.org"]
+    assert recipients.headers("to") == ['"Doe, John" <john@example.org>']
+    assert recipients.headers("cc")[0] == '"Roe, Jane" <jane@example.org>'
+    assert parse_recipient(recipients.headers("cc")[1]).addr == "pat@example.org"
 
 
 def test_forward_subject_and_body():
@@ -220,7 +242,7 @@ def test_attachment_errors():
     with pytest.raises(ValueError, match="content_base64 is required"):
         decode_attachments([{"filename": "a"}])
     big = b64(b"x" * (MAX_ATTACHMENT_BYTES // 2 + 1))
-    with pytest.raises(ValueError, match="larger than 10 MiB"):
+    with pytest.raises(ValueError, match="larger than 2 MiB in total; for bigger files"):
         decode_attachments([{"filename": "a", "content_base64": big}] * 2)
     with pytest.raises(ValueError, match="at most 20 attachments"):
         decode_attachments([{"filename": "a", "content_base64": b64(b"x")}] * 21)
@@ -343,6 +365,29 @@ def test_stored_draft_without_message_id_gets_one_and_lf_is_normalised():
     assert d.message_id.endswith("@example.com>")
     assert f"Message-ID: {d.message_id}".encode() in d.sent_copy
     assert b"\n" not in d.sent_copy.replace(b"\r\n", b"")
+
+
+def test_stored_draft_bare_cr_cannot_hide_a_bcc_line():
+    # A bare CR is a line break to some parsers: the Bcc line must not reach the wire.
+    raw = (
+        b"From: user@example.com\r\n"
+        b"To: bob@example.org\rBcc: hidden@example.org\r\n"
+        b"Subject: x\r\n\r\nbody\r"
+    )
+    d = prepare_stored_draft(raw, ME)
+    assert b"\r" not in d.sent_copy.replace(b"\r\n", b"")
+    assert b"\n" not in d.sent_copy.replace(b"\r\n", b"")
+    assert "hidden@example.org" in d.recipients.envelope
+    assert b"hidden@example.org" not in without_bcc(d.sent_copy)
+
+
+def test_stored_draft_senders_are_its_from_and_sender():
+    raw = (
+        b"From: Me <User@Example.com>\r\nSender: other@example.org\r\n"
+        b"To: bob@example.org\r\n\r\nbody"
+    )
+    assert prepare_stored_draft(raw, ME).senders == ["user@example.com", "other@example.org"]
+    assert prepare_stored_draft(DRAFT, ME).senders == ["user@example.com"]
 
 
 def test_stored_draft_without_recipients_is_refused():

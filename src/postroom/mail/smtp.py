@@ -1,16 +1,23 @@
 """Outgoing mail over SMTP: the connector (connect, TLS, login) and the per-account sender
 with the same fail2ban care as the IMAP pool.
 
-- Password accounts log in with AUTH (`login()`, or AUTH PLAIN in UTF-8 for a non-ASCII
-  password); Gmail accounts use XOAUTH2 with the same Google access token as IMAP.
+- Password accounts make exactly one AUTH attempt per login: PLAIN when the server offers
+  it, else LOGIN (both UTF-8). `smtplib.login()` is not used: it tries every advertised
+  mechanism in turn, so one wrong password would cost two or three failed logins.
+- Gmail accounts use XOAUTH2 with the same Google access token as IMAP. When Gmail refuses
+  it, the cached token is dropped and the login is retried once with a fresh one; Gmail
+  failures never pause sending (no fail2ban there, and no password to fix).
 - Every SMTP login holds the account's shared login lock (`login_locks.py`) and re-reads the
   account under it, so an SMTP login never races an IMAP or DAV login to the same server.
-- A failed SMTP login is recorded as `smtp_status = auth_failed`, and no further send logs
-  in again until the owner tests the account (`manual=True`): a wrong SMTP password costs
-  one failed login, not one per send. An account whose IMAP login failed (`needs_reconnect`)
+- A password login refused with a permanent (5xx) reply is recorded as
+  `smtp_status = auth_failed`, and no further send logs in again until the owner tests the
+  account (`manual=True`): a wrong SMTP password costs one failed login, not one per send.
+  A temporary (4xx) refusal is an ordinary error and does not pause sending. An account whose IMAP login failed (`needs_reconnect`)
   does not send either: it would fail the same way with the same password.
 - A send is never retried here. Once DATA has begun the server may have accepted the
   message, so a lost connection from then on is reported as "may have been sent".
+- DATA streams the message from the caller's bytes (dot-stuffed on the fly) instead of
+  `smtplib.data()`, which makes three whole-message copies first.
 
 Error messages are safe to show to the owner and the model: they carry the server's
 SMTP reply code and text, never the password or the token.
@@ -39,7 +46,7 @@ class SmtpError(Exception):
 
 
 class SmtpAuthFailed(SmtpError):
-    """The SMTP server rejected the login."""
+    """The SMTP server rejected the password for good (a 5xx reply): sending pauses."""
 
 
 class SmtpUnavailable(SmtpError):
@@ -96,6 +103,35 @@ def _quit_quietly(smtp) -> None:
             pass
 
 
+def _b64(data: bytes) -> str:
+    return base64.b64encode(data).decode("ascii")
+
+
+def _auth_mechanisms(smtp) -> list[str]:
+    features = getattr(smtp, "esmtp_features", {}) or {}
+    return str(features.get("auth", "")).upper().split()
+
+
+def _send_data(smtp, raw: bytes) -> tuple[int, bytes]:
+    """DATA with `raw` (CRLF lines) streamed from the caller's bytes: lines that start with
+    "." get a second one (RFC 5321 4.5.2), then the terminator. Same wire bytes and
+    errors as `smtplib.SMTP.data()`, without its whole-message copies."""
+    code, resp = smtp.docmd("DATA")
+    if code != 354:
+        raise smtplib.SMTPDataError(code, resp)
+    view = memoryview(raw)
+    start = 0
+    if raw.startswith(b"."):
+        smtp.send(b".")
+    while (i := raw.find(b"\n.", start)) != -1:
+        smtp.send(view[start : i + 1])
+        smtp.send(b".")
+        start = i + 1
+    smtp.send(view[start:])
+    smtp.send(b".\r\n" if raw.endswith(b"\r\n") else b"\r\n.\r\n")
+    return smtp.getreply()
+
+
 def _has_extn(smtp, name: str) -> bool:
     try:
         return bool(smtp.has_extn(name))
@@ -111,6 +147,7 @@ class SmtpConnector:
         self,
         google_token: TokenSource | None = None,
         ssl_context: ssl.SSLContext | None = None,
+        google_invalidate: Callable[[str], None] | None = None,
         connect_timeout: float = CONNECT_TIMEOUT,
         command_timeout: float = COMMAND_TIMEOUT,
         local_hostname: str | None = None,
@@ -118,6 +155,7 @@ class SmtpConnector:
         smtp_ssl_class=smtplib.SMTP_SSL,
     ):
         self.google_token = google_token
+        self.google_invalidate = google_invalidate
         self.ssl_context = ssl_context
         self.connect_timeout = connect_timeout
         self.command_timeout = command_timeout
@@ -145,8 +183,27 @@ class SmtpConnector:
         server = account.smtp_server
         if server is None:
             raise SmtpError("SMTP is not configured for this account")
-        host, port, security = server
         token = self._credentials(account, secret)
+        if token is None:
+            return self._open(account, server, secret, None)
+        try:
+            return self._open(account, server, None, token)
+        except SmtpAuthFailed as e:
+            if self.google_invalidate is None:
+                raise SmtpError(str(e)) from e  # never the fail2ban pause for Google
+        # The cached access token may be stale: drop it and try once with a fresh one.
+        self.google_invalidate(account.email)
+        token = self._credentials(account, secret)
+        try:
+            return self._open(account, server, None, token)
+        except SmtpAuthFailed as e:
+            raise SmtpError(
+                f"{e}; Google refused a fresh access token too: reconnect the Google account "
+                "in the admin UI if this persists"
+            ) from e
+
+    def _open(self, account: Account, server: tuple[str, int, str], secret, token):
+        host, port, security = server
         ctx = self.ssl_context or ssl.create_default_context()
         try:
             if security == "ssl":
@@ -180,6 +237,10 @@ class SmtpConnector:
             self._login(smtp, account.smtp_login, secret, token)
         except smtplib.SMTPAuthenticationError as e:
             _quit_quietly(smtp)
+            if 400 <= e.smtp_code < 500:
+                raise SmtpError(
+                    f"SMTP: temporary authentication failure ({_safe(e)}); try again later"
+                ) from e
             raise SmtpAuthFailed(f"SMTP: authentication failed ({_safe(e)})") from e
         except smtplib.SMTPNotSupportedError as e:
             _quit_quietly(smtp)
@@ -194,18 +255,30 @@ class SmtpConnector:
 
     @staticmethod
     def _login(smtp, user: str, secret: str | None, token: str | None) -> None:
+        """Exactly one AUTH exchange (see the module docstring)."""
         if token is not None:
             smtp.auth("XOAUTH2", _xoauth2(user, token), initial_response_ok=True)
-        elif (user + (secret or "")).isascii():
-            smtp.login(user, secret)
+            return
+        if not _has_extn(smtp, "auth"):
+            raise smtplib.SMTPNotSupportedError("SMTP AUTH extension not supported by server")
+        mechanisms = _auth_mechanisms(smtp)
+        name, password = user.encode(), (secret or "").encode()
+        if "PLAIN" in mechanisms:  # RFC 4616, UTF-8, with the initial response
+            code, resp = smtp.docmd("AUTH", "PLAIN " + _b64(b"\0" + name + b"\0" + password))
+        elif "LOGIN" in mechanisms:
+            code, resp = smtp.docmd("AUTH", "LOGIN")
+            if code == 334:
+                code, resp = smtp.docmd(_b64(name))
+            if code == 334:
+                code, resp = smtp.docmd(_b64(password))
         else:
-            # smtplib encodes AUTH credentials as ASCII; RFC 4616 PLAIN is UTF-8.
-            if not _has_extn(smtp, "auth"):
-                raise smtplib.SMTPNotSupportedError("SMTP AUTH extension not supported")
-            blob = base64.b64encode(b"\0" + user.encode() + b"\0" + secret.encode()).decode()
-            code, resp = smtp.docmd("AUTH", "PLAIN " + blob)
-            if code != 235:
-                raise smtplib.SMTPAuthenticationError(code, resp)
+            offered = " ".join(mechanisms) or "none"
+            raise SmtpError(
+                f"SMTP: the server offers no password login Postroom supports (AUTH {offered}; "
+                "PLAIN or LOGIN is needed)"
+            )
+        if code != 235:
+            raise smtplib.SMTPAuthenticationError(code, resp)
 
     def check(self, account: Account, secret: str | None) -> None:
         """Connect, EHLO, (STARTTLS), AUTH, QUIT: nothing is sent."""
@@ -252,7 +325,7 @@ class SmtpConnector:
 
         # From here on the server may accept the message even if we never hear back.
         try:
-            code, resp = smtp.data(raw)
+            code, resp = _send_data(smtp, raw)
         except smtplib.SMTPDataError as e:  # DATA itself refused (no 354): nothing sent
             raise SmtpRejected(f"the SMTP server rejected the message: {_safe(e)}") from e
         except (OSError, smtplib.SMTPException) as e:

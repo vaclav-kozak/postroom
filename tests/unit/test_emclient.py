@@ -2,7 +2,7 @@ import base64
 
 import pytest
 
-from postroom.accounts import AccountStatus, Provider
+from postroom.accounts import AccountStatus, MailAccess, Provider, SmtpStatus
 from postroom.importer.emclient import (
     EmClientImportError,
     apply_import,
@@ -147,13 +147,39 @@ def test_smtp_import_variants():
     # Unusable values are skipped rather than stored.
     assert _smtp_only(imap, proto("SMTP", "smtp example.com", "465", "SSL")).smtp_host is None
     assert _smtp_only(imap, proto("SMTP", "smtp.example.com", "99999", "SSL")).smtp_host is None
+    bad_login = f'<LoginName xmlns="{E}">c sender\t</LoginName>'
+    assert (
+        _smtp_only(imap, proto("SMTP", "smtp.example.com", "", "TLS", extra=bad_login)).smtp_host
+        is None
+    )
+    # Port 465 is implicit TLS, whatever the export calls the encryption.
+    c = _smtp_only(imap, proto("SMTP", "smtp.example.com", "465", "Auto"))
+    assert (c.smtp_port, c.smtp_security) == (465, "ssl")
 
 
 def test_apply_import_stores_smtp(repo):
     apply_import(repo, parse_emclient_export(XML, PASS))
     a = repo.get("a@example.com")
     assert (a.smtp_host, a.smtp_port, a.smtp_security) == ("mail.example.com", 465, "ssl")
-    assert a.can_send and not repo.get("b@example.org").can_send
+    # Sending is opt-in: imported accounts start at "organize", even with an SMTP server.
+    assert a.mail_access == MailAccess.ORGANIZE and not a.can_send
+    repo.set_mail_access("a@example.com", MailAccess.FULL)
+    repo.set_mail_access("b@example.org", MailAccess.FULL)
+    assert repo.get("a@example.com").can_send and not repo.get("b@example.org").can_send
+
+
+def test_reimport_with_new_smtp_settings_clears_the_smtp_status(repo):
+    apply_import(repo, parse_emclient_export(XML, PASS))
+    repo.set_smtp_status("a@example.com", SmtpStatus.OK)
+    apply_import(repo, parse_emclient_export(XML, PASS))  # unchanged: the status stays
+    assert repo.get("a@example.com").smtp_status == SmtpStatus.OK
+    changed = XML.replace(
+        b"<Server>mail.example.com</Server>", b"<Server>smtp2.example.com</Server>", 1
+    )
+    apply_import(repo, parse_emclient_export(changed, PASS))
+    a = repo.get("a@example.com")
+    assert (a.smtp_host, a.imap_host) == ("smtp2.example.com", "mail.example.com")
+    assert a.smtp_status is None  # "SMTP OK" was about the old server
 
 
 def test_wrong_passphrase_detected():

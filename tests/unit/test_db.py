@@ -75,7 +75,7 @@ def test_migration_2_upgrades_a_v1_database(tmp_path):
     assert db.one("SELECT count(*) FROM oauth_used_codes")[0] == 0
 
 
-def test_migration_3_gives_existing_accounts_full_mail_access(tmp_path):
+def test_migration_3_makes_existing_accounts_organize_only(tmp_path, box):
     import sqlite3
 
     from postroom.db import MIGRATIONS
@@ -90,10 +90,22 @@ def test_migration_3_gives_existing_accounts_full_mail_access(tmp_path):
         "INSERT INTO accounts(email, provider, created_at, updated_at)"
         " VALUES('user@example.com', 'imap', 1, 1)"
     )
+    conn.execute(
+        "INSERT INTO accounts(email, provider, created_at, updated_at)"
+        " VALUES('me@gmail.com', 'google', 1, 1)"
+    )
     conn.close()
     db = Database(p)
     assert db.one("PRAGMA user_version")[0] == SCHEMA_VERSION == 4
-    assert db.one("SELECT mail_access FROM accounts")[0] == "full"
+    assert [r[0] for r in db.query("SELECT mail_access FROM accounts")] == ["organize"] * 2
+    # Sending is opt-in: neither account may send until the owner says so,
+    # not even Gmail, whose outgoing server needs no settings.
+    from postroom.accounts import AccountRepo
+
+    repo = AccountRepo(db, box)
+    for acc in repo.list():
+        assert acc.capabilities[:2] == ["mail", "mail.organize"]
+        assert "mail.send" not in acc.capabilities and not acc.can_send
     with pytest.raises(sqlite3.IntegrityError):
         db.execute("UPDATE accounts SET mail_access = 'admin'")
     with pytest.raises(sqlite3.IntegrityError):

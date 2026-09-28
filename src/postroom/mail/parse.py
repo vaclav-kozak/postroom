@@ -129,6 +129,20 @@ def decode_header_value(value: bytes | str | None) -> str:
         return s
 
 
+# RFC 5322 "specials": a display name containing one must be quoted, or a reader of the
+# formatted address (e.g. a reply built from it) splits "Doe, John <j@x>" at the comma.
+_ADDRESS_SPECIALS = re.compile(r'[][\\()<>@,:;".]')
+
+
+def format_address(name: str | None, addr: str) -> str:
+    """The address as `Name <addr>` (the name quoted when needed, not encoded), or `addr`."""
+    if not name:
+        return addr
+    if _ADDRESS_SPECIALS.search(name):
+        name = '"' + name.replace("\\", "\\\\").replace('"', '\\"') + '"'
+    return f"{name} <{addr}>"
+
+
 def format_addresses(addrs) -> list[str]:
     """Format imapclient `Address` tuples as "Name <mailbox@host>" / "mailbox@host"."""
     if not addrs:
@@ -141,7 +155,7 @@ def format_addresses(addrs) -> list[str]:
         host = a.host.decode("utf-8", "replace") if a.host else ""
         addr = f"{mailbox}@{host}"
         name = decode_header_value(a.name) if a.name else ""
-        out.append(f"{name} <{addr}>" if name else addr)
+        out.append(format_address(name, addr))
     return out
 
 
@@ -214,7 +228,7 @@ def _addr_list(msg: Message, name: str) -> list[str]:
     for display_name, addr in email.utils.getaddresses([raw]):
         if not addr:
             continue
-        out.append(f"{display_name} <{addr}>" if display_name else addr)
+        out.append(format_address(display_name, addr))
     return out
 
 
@@ -226,7 +240,7 @@ def _addr_single(msg: Message, name: str) -> str:
     if not addrs:
         return ""
     display_name, addr = addrs[0]
-    return f"{display_name} <{addr}>" if display_name else addr
+    return format_address(display_name, addr) if addr else ""
 
 
 def _content_text(part: Message) -> str:

@@ -103,6 +103,18 @@
     {% endfor %}
     </tbody>
   </table>
+  {% if accounts | length > 1 %}
+  <form method="post" action="/admin/accounts/access" class="key-form bulk-access">
+    <input type="hidden" name="csrf" value="{{ csrf }}">
+    <div class="field">
+      <label for="access-all">Access level for all accounts</label>
+      <select id="access-all" name="mail_access">
+        {% for value, label, hint in access_levels %}<option value="{{ value }}"{% if value == "organize" %} selected{% endif %}>{{ label }}: {{ hint }}</option>{% endfor %}
+      </select>
+    </div>
+    <button type="submit" class="btn btn-secondary">Apply to all</button>
+  </form>
+  {% endif %}
   {% else %}
   <div class="empty">
     <svg class="empty-art" viewBox="0 0 96 64" aria-hidden="true" focusable="false">

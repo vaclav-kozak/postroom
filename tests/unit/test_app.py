@@ -2,12 +2,10 @@ from fastmcp import Client
 
 from postroom.accounts import AccountStatus, Provider
 from postroom.app import (
-    MCP_MAX_BODY_BYTES,
     SERVER_INSTRUCTIONS,
     build_mcp,
     build_services,
     create_app,
-    raise_mcp_body_limit,
 )
 from postroom.google.oauth import GoogleOAuth
 
@@ -135,11 +133,19 @@ def test_build_services_wires_smtp(settings):
     assert s.mail.smtp.locks is s.pool.locks
     assert s.mail.smtp.repo is s.repo
     assert s.mail.smtp.connector.google_token == s.google.access_token
+    assert s.mail.smtp.connector.google_invalidate == s.google.invalidate
     assert s.mail.smtp.connector.local_hostname == "testserver"
     assert s.mail.send_limiter.per_hour == 7
 
 
-async def test_mcp_request_body_limit_is_raised_for_attachments(settings):
+async def test_the_largest_inline_attachment_fits_the_sdk_request_limit(settings):
+    """No private patch: the SDK's own /mcp body limit stands, and a send_email call with
+    the largest allowed inline attachments fits under it (base64 + JSON-RPC overhead)."""
+    import base64
+    import json
+
+    from postroom.mail.outgoing import MAX_ATTACHMENT_BYTES
+
     settings.public_url = "http://localhost"
     app = create_app(settings, build_services(settings))
     async with app.router.lifespan_context(app):
@@ -148,13 +154,28 @@ async def test_mcp_request_body_limit_is_raised_for_attachments(settings):
         while node is not None and limiter is None:
             limiter = getattr(getattr(node, "session_manager", None), "asgi_app", None)
             node = getattr(node, "app", None)
-        assert limiter is not None
-        assert limiter.max_body_size == MCP_MAX_BODY_BYTES == 16 * 1024 * 1024
-        assert raise_mcp_body_limit(app) is True
-
-
-def test_body_limit_layout_missing_is_logged(caplog):
-    from starlette.applications import Starlette
-
-    assert raise_mcp_body_limit(Starlette()) is False
-    assert "request body limit" in caplog.text
+        assert limiter is not None and limiter.max_body_size == 4 * 1024 * 1024
+    files = [
+        {
+            "filename": f"part{i}.bin",
+            "content_type": "application/octet-stream",
+            "content_base64": base64.b64encode(b"\xff" * (MAX_ATTACHMENT_BYTES // 4)).decode(),
+        }
+        for i in range(4)
+    ]
+    request = {
+        "jsonrpc": "2.0",
+        "id": 1,
+        "method": "tools/call",
+        "params": {
+            "name": "send_email",
+            "arguments": {
+                "account": "user@example.com",
+                "to": ["bob@example.org"],
+                "subject": "files",
+                "body": "x" * 100_000,
+                "attachments": files,
+            },
+        },
+    }
+    assert len(json.dumps(request).encode()) < limiter.max_body_size - 512 * 1024

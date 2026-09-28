@@ -32,7 +32,13 @@ from postroom.mail.folders import FolderNotFound
 from postroom.mail.heavy import ServerBusy, heavy_work
 from postroom.mail.imap import ImapError
 from postroom.mail.models import AttachmentInfo, MessageRef, SearchCriteria
-from postroom.mail.outgoing import MAX_ATTACHMENTS, MAX_RECIPIENTS, SendLimitExceeded
+from postroom.mail.outgoing import (
+    MAX_ATTACHMENTS,
+    MAX_RECIPIENTS,
+    DuplicateSend,
+    SendLimitExceeded,
+    SendTimeout,
+)
 from postroom.mail.parse import truncate
 from postroom.mail.pdf import PdfTooComplex, extract_text_isolated
 from postroom.mail.service import MAX_BATCH_REFS, MAX_SEARCH_OFFSET, PARTIAL_TIMEOUT, MailService
@@ -71,6 +77,7 @@ _CLIENT_ERRORS = (
     MailAccessDenied,
     SendingDisabled,
     SendLimitExceeded,
+    DuplicateSend,
     SmtpError,
 )
 _ISO_DATE = re.compile(r"\d{4}-\d{2}-\d{2}")
@@ -98,11 +105,14 @@ CREATE_FOLDER_TIMEOUT_MESSAGE = (
 )
 
 
-# A send that timed out may already be out: retrying could send it twice.
+# A send that timed out after it started may already be out: retrying could send it twice.
 SEND_TIMEOUT_MESSAGE = (
-    "the mail server did not respond in time; the email may already have been sent; check "
-    "the Sent folder (search_emails folder='sent') before retrying"
+    "the mail server did not respond in time; the email may already have been sent. Do not "
+    "retry automatically; check the Sent folder (search_emails folder='sent'), and ask the "
+    "owner if it's not there"
 )
+# A timeout before the send started (e.g. reading the email being answered).
+PRESEND_TIMEOUT_MESSAGE = "the mail server did not respond in time; nothing was sent"
 
 
 class Attachment(BaseModel):
@@ -146,6 +156,8 @@ def _tool_errors(timeout_message: str = TIMEOUT_MESSAGE) -> Iterator[None]:
     """Turn expected mail errors into clean `ToolError`s (message only, no traceback)."""
     try:
         yield
+    except SendTimeout as e:
+        raise ToolError(SEND_TIMEOUT_MESSAGE) from e
     except TimeoutError as e:
         raise ToolError(timeout_message) from e
     except _CLIENT_ERRORS as e:
@@ -495,6 +507,7 @@ def register_mail_tools(mcp: FastMCP, repo: AccountRepo, mail: MailService) -> N
         reply_to_uid: int | None = None,
         reply_all: bool = False,
         attachments: Attachments | None = None,
+        allow_duplicate: bool = False,
     ) -> dict:
         """SEND an email immediately from the account. It cannot be undone.
 
@@ -506,13 +519,17 @@ def register_mail_tools(mcp: FastMCP, repo: AccountRepo, mail: MailService) -> N
         To reply, pass reply_to_uid (and reply_to_folder, default inbox): the email is
         threaded to the original; `to` / `subject` default to the original sender and
         "Re: <subject>"; reply_all=true also sends it to the original's To and Cc.
-        attachments: [{filename, content_type, content_base64}], at most 10 MiB in total.
+        attachments: [{filename, content_type, content_base64}], small files only: at most
+        2 MiB in total. For bigger files, forward an email that has them (forward_email), or
+        have the owner attach them to a draft and send it with send_draft.
 
         Returns {"account", "message_id", "recipients", "saved_to_sent", "sent_folder",
-        "warnings"}. A copy is saved in the Sent folder. Never call it again for the same
-        email after an error or timeout without checking the Sent folder first.
+        "warnings"}. A copy is saved in the Sent folder. After an error or timeout, never
+        call it again for the same email on your own: check the Sent folder and ask the
+        owner. The same email to the same recipients is refused for 10 minutes after it
+        was sent; allow_duplicate=true sends it anyway (only when the owner asks for that).
         """
-        with _tool_errors(SEND_TIMEOUT_MESSAGE):
+        with _tool_errors(PRESEND_TIMEOUT_MESSAGE):
             result = await mail.send(
                 _norm(account),
                 to=list(to or []),
@@ -525,6 +542,7 @@ def register_mail_tools(mcp: FastMCP, repo: AccountRepo, mail: MailService) -> N
                 reply_uid=reply_to_uid,
                 reply_all=reply_all,
                 attachments=attachments,
+                allow_duplicate=allow_duplicate,
             )
         return result.to_dict()
 
@@ -538,6 +556,7 @@ def register_mail_tools(mcp: FastMCP, repo: AccountRepo, mail: MailService) -> N
         cc: Recipients | None = None,
         bcc: Recipients | None = None,
         include_attachments: bool = True,
+        allow_duplicate: bool = False,
     ) -> dict:
         """FORWARD an email immediately (it is sent; it cannot be undone).
 
@@ -545,9 +564,10 @@ def register_mail_tools(mcp: FastMCP, repo: AccountRepo, mail: MailService) -> N
         / bcc: email addresses. body: your text above the forwarded message. The original's
         attachments are included (at most 20 MiB in total) unless include_attachments=false.
         Needs mail access "full" and an outgoing server (capability "mail.send").
-        Returns the same fields as send_email.
+        Returns the same fields as send_email; the same duplicate rule and allow_duplicate
+        apply.
         """
-        with _tool_errors(SEND_TIMEOUT_MESSAGE):
+        with _tool_errors(PRESEND_TIMEOUT_MESSAGE):
             result = await mail.forward(
                 _norm(account),
                 folder,
@@ -557,18 +577,23 @@ def register_mail_tools(mcp: FastMCP, repo: AccountRepo, mail: MailService) -> N
                 bcc=bcc,
                 body=body,
                 include_attachments=include_attachments,
+                allow_duplicate=allow_duplicate,
             )
         return result.to_dict()
 
     @mcp.tool(annotations=SENDS)
-    async def send_draft(account: str, uid: int, folder: str = "drafts") -> dict:
+    async def send_draft(
+        account: str, uid: int, folder: str = "drafts", allow_duplicate: bool = False
+    ) -> dict:
         """SEND a saved draft as it is, immediately, then remove it from the Drafts folder.
 
         Use it for a draft the owner has reviewed (e.g. one made by create_draft; find its
-        uid with search_emails folder='drafts'). Only drafts can be sent this way.
+        uid with search_emails folder='drafts'). Only the account's own drafts can be sent
+        this way: the email needs the \\Draft flag and the account's address in From.
         Needs mail access "full" and an outgoing server (capability "mail.send").
-        Returns the send_email fields plus "draft_removed".
+        Returns the send_email fields plus "draft_removed". A draft already sent within
+        the hour is refused; allow_duplicate=true sends it again (only when the owner asks).
         """
-        with _tool_errors(SEND_TIMEOUT_MESSAGE):
-            result = await mail.send_draft(_norm(account), uid, folder)
+        with _tool_errors(PRESEND_TIMEOUT_MESSAGE):
+            result = await mail.send_draft(_norm(account), uid, folder, allow_duplicate)
         return result.to_dict()

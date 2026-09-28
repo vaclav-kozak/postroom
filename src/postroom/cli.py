@@ -83,12 +83,25 @@ def _cmd_list_accounts(args: argparse.Namespace) -> int:
 
 
 def _cmd_set_access(args: argparse.Namespace) -> int:
+    levels = [m.value for m in MailAccess]
+    usage = "usage: postroom set-access EMAIL LEVEL | postroom set-access --all LEVEL"
+    if len(args.target) != (1 if args.all else 2):
+        print(usage, file=sys.stderr)
+        return 2
+    level = args.target[-1]
+    if level not in levels:
+        print(f"unknown access level {level!r}: choose {', '.join(levels)}", file=sys.stderr)
+        return 2
     _, _, _, repo = _services_minimal()
-    email = args.email.strip().lower()
-    if not repo.set_mail_access(email, MailAccess(args.level)):
+    if args.all:
+        count = repo.set_mail_access_all(MailAccess(level))
+        print(f"{count} accounts\t{level}")
+        return 0
+    email = args.target[0].strip().lower()
+    if not repo.set_mail_access(email, MailAccess(level)):
         print(f"unknown account: {email}", file=sys.stderr)
         return 1
-    print(f"{email}\t{args.level}")
+    print(f"{email}\t{level}")
     return 0
 
 
@@ -256,11 +269,15 @@ def main(argv: list[str] | None = None) -> int:
         description=(
             "Set an account's mail access level: read (search, read, create drafts), "
             "organize (also mark read/flagged, move, trash, create folders) or full "
-            "(also send). New and existing accounts default to full."
+            "(also send). Accounts default to organize: sending is opt-in. "
+            "Use --all LEVEL to set every account at once."
         ),
+        usage="postroom set-access EMAIL LEVEL | postroom set-access --all LEVEL",
     )
-    p_access.add_argument("email", help="The account's email address")
-    p_access.add_argument("level", choices=[m.value for m in MailAccess])
+    p_access.add_argument("--all", action="store_true", help="Set every account")
+    p_access.add_argument(
+        "target", nargs="+", metavar="EMAIL LEVEL", help="The account's email and the level"
+    )
     p_access.set_defaults(func=_cmd_set_access)
 
     p_gen = sub.add_parser(

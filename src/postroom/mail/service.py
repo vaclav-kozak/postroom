@@ -17,6 +17,8 @@ deletes other mail permanently; a plain EXPUNGE is never issued.
 """
 
 import asyncio
+import hashlib
+import json
 import threading
 from collections.abc import Callable, Sequence
 from contextlib import contextmanager, nullcontext
@@ -55,9 +57,15 @@ from postroom.mail.models import (
     SendResult,
 )
 from postroom.mail.outgoing import (
+    DUPLICATE_WINDOW,
+    JOURNAL_TTL,
     MAX_DRAFT_BYTES,
     MAX_FORWARD_ATTACHMENT_BYTES,
+    MAYBE_SENT,
+    SENT,
+    SendJournal,
     SendRateLimiter,
+    SendTimeout,
     StoredDraft,
     check_subject,
     collect_recipients,
@@ -89,7 +97,7 @@ from postroom.mail.parse import (
     truncate,
 )
 from postroom.mail.parse import get_attachment as parse_get_attachment
-from postroom.mail.smtp import SmtpConnector, SmtpSender
+from postroom.mail.smtp import SendOutcome, SmtpConnector, SmtpMaybeSent, SmtpSender
 
 # Reading one email. It is parsed whole only when it is small and simple: at 5 MiB the
 # parse peaks at +40 MiB (base64 attachment) to +67 MiB (8-bit HTML), and thousands of
@@ -139,6 +147,8 @@ GMAIL_ARCHIVE_NEEDS_INBOX = (
 SEND_TIMEOUT = 180
 SEND_POLICY = email_policy.SMTP.clone(cte_type="7bit")
 FORWARDED = "$Forwarded"
+# Marks the Sent copy of an email whose SMTP connection broke during DATA.
+MAYBE_SENT_KEYWORD = "$MaybeSent"
 DRAFT_NOT_REMOVED = "the email was sent, but the draft could not be removed from {folder}: {error}"
 
 _BLOCKED_STATUSES = (AccountStatus.NEEDS_RECONNECT, AccountStatus.NEEDS_GOOGLE_CONNECT)
@@ -578,6 +588,29 @@ def _own_addresses(account: Account) -> set[str]:
     return own
 
 
+@dataclass
+class _DraftLock:
+    lock: asyncio.Lock = field(default_factory=asyncio.Lock)
+    users: int = 0  # callers holding or waiting for the lock; the entry goes at zero
+
+
+def _content_key(*parts: object) -> str:
+    """A stable hash of a send's identifying parts (for the duplicate guard)."""
+    blob = json.dumps(parts, default=str, ensure_ascii=False, sort_keys=True)
+    return hashlib.sha256(blob.encode("utf-8", "surrogatepass")).hexdigest()
+
+
+def _maybe_sent_message(error: Exception, result: SendResult) -> str:
+    if result.saved_to_sent and result.sent_folder:
+        where = f"a copy was saved in {result.sent_folder} with the keyword {MAYBE_SENT_KEYWORD}"
+    else:
+        where = "check the Sent folder (search_emails folder='sent')"
+    return (
+        f"{error}. Do not retry automatically; {where}. Ask the owner whether the recipients "
+        "got it before sending it again"
+    )
+
+
 def _gmail_files_sent_mail(account: Account) -> bool:
     """Gmail puts mail sent through its SMTP server into Sent by itself."""
     server = account.smtp_server
@@ -643,6 +676,10 @@ class MailService:
         self.smtp = smtp or SmtpSender(repo, SmtpConnector(), getattr(pool, "locks", None))
         self.send_limiter = SendRateLimiter(send_limit_per_hour)
         self.send_timeout = send_timeout
+        self.journal = SendJournal()
+        # One send_draft at a time per (account, folder, uid): a parallel second call waits,
+        # then finds the draft gone (or the journal refuses it).
+        self._draft_locks: dict[tuple[str, str, int], _DraftLock] = {}
 
     async def _run(self, fn, timeout: float | None = None):
         return await asyncio.wait_for(asyncio.to_thread(fn), timeout or self.account_timeout)
@@ -1066,6 +1103,7 @@ class MailService:
         reply_uid: int | None = None,
         reply_all: bool = False,
         attachments: list[dict] | None = None,
+        allow_duplicate: bool = False,
     ) -> SendResult:
         """Send a new email, or a reply when `reply_uid` is given (threaded like
         `create_draft`; `reply_all` also copies the original's To and Cc into Cc)."""
@@ -1075,7 +1113,7 @@ class MailService:
             raise ValueError("reply_all needs reply_to_uid")
         files = decode_attachments(attachments)
         to, cc, bcc = list(to or []), list(cc or []), list(bcc or [])
-        in_reply_to, references, original_ref = None, [], None
+        in_reply_to, references, original_ref, dropped = None, [], None, []
         if reply_uid is None:
             collect_recipients(to, cc, bcc)  # fail fast, before any server is contacted
         else:
@@ -1085,7 +1123,7 @@ class MailService:
                     return self._original_header(c, c.list_folders(), reply_folder, reply_uid)
 
             original, folder_name = await self._run(read_original)
-            to, cc = reply_recipients(original, to, cc, reply_all, _own_addresses(account))
+            to, cc, dropped = reply_recipients(original, to, cc, reply_all, _own_addresses(account))
             if subject is None:
                 subject = _one_line(reply_subject(original.subject))
             in_reply_to, references = _threading_headers(original)
@@ -1093,6 +1131,16 @@ class MailService:
         if subject is None:
             raise ValueError("subject is required")
         recipients = collect_recipients(to, cc, bcc)
+        key = _content_key(
+            account.email,
+            "send",
+            recipients.envelope,
+            subject,
+            body,
+            html,
+            [original_ref[0], reply_uid] if original_ref else None,
+            [[f.filename, hashlib.sha256(f.data).hexdigest()] for f in files],
+        )
 
         def build() -> tuple[bytes, str]:
             with _heavy_if(sum(len(f.data) for f in files) > HEAVY_MESSAGE_BYTES):
@@ -1114,9 +1162,21 @@ class MailService:
 
         sent_copy, msgid = await asyncio.to_thread(build)
         files.clear()
-        return await self._deliver(
-            account, recipients.envelope, sent_copy, msgid, flag_original=original_ref
+        result = await self._deliver(
+            account,
+            recipients.envelope,
+            sent_copy,
+            msgid,
+            keys={key: DUPLICATE_WINDOW},
+            allow_duplicate=allow_duplicate,
+            flag_original=original_ref,
         )
+        if dropped:
+            result.warnings.append(
+                "reply-all left out these addresses from the original, which are not usable "
+                f"email addresses: {'; '.join(dropped)}"
+            )
+        return result
 
     async def forward(
         self,
@@ -1129,6 +1189,7 @@ class MailService:
         bcc: list[str] | None = None,
         body: str = "",
         include_attachments: bool = True,
+        allow_duplicate: bool = False,
     ) -> SendResult:
         """Forward an email: the user's text, a "Forwarded message" block and the original
         text, with the original's attachments (unless `include_attachments` is false)."""
@@ -1151,6 +1212,7 @@ class MailService:
                         files = []
                         if include_attachments:
                             items = list(iter_attachments(raw))
+                            del raw
                             total = sum(len(data) for _info, data in items)
                             if total > MAX_FORWARD_ATTACHMENT_BYTES:
                                 raise _too_big_to_forward(total)
@@ -1168,6 +1230,16 @@ class MailService:
         if cut:
             text += BODY_NOT_LOADED
         in_reply_to, references = _threading_headers(original)
+        key = _content_key(
+            account.email,
+            "forward",
+            recipients.envelope,
+            folder_name,
+            uid,
+            original.message_id,
+            body,
+            include_attachments,
+        )
 
         def build() -> tuple[bytes, str]:
             with _heavy_if(sum(len(f.data) for f in files) > HEAVY_MESSAGE_BYTES):
@@ -1185,15 +1257,17 @@ class MailService:
                     attachments=files,
                     msg_policy=SEND_POLICY,
                 )
+                files.clear()
                 return msg.as_bytes(), msgid
 
         sent_copy, msgid = await asyncio.to_thread(build)
-        files.clear()
         result = await self._deliver(
             account,
             recipients.envelope,
             sent_copy,
             msgid,
+            keys={key: DUPLICATE_WINDOW},
+            allow_duplicate=allow_duplicate,
             flag_original=(folder_name, uid, FORWARDED),
         )
         if cut:
@@ -1203,12 +1277,14 @@ class MailService:
     @staticmethod
     def _large_attachments(c, uid: int, bodystructure) -> list:
         """Every attachment of an email too large to parse whole, part by part, within
-        the forwarding cap."""
+        the forwarding cap (counted in decoded bytes, like the whole-parse path)."""
         plan = _plan(bodystructure)
         items, total = [], 0
         for info, part in plan.attachments:
-            if total + info.size > MAX_FORWARD_ATTACHMENT_BYTES:
-                raise _too_big_to_forward(total + info.size)
+            # BODYSTRUCTURE gives the encoded size; base64 decodes to about 3/4 of it.
+            estimate = info.size * 3 // 4 if part.encoding == "base64" else info.size
+            if total + estimate > MAX_FORWARD_ATTACHMENT_BYTES:
+                raise _too_big_to_forward(total + estimate)
             budget = MAX_FORWARD_ATTACHMENT_BYTES - total
             limit = budget * 78 // 57 + 4096  # base64-encoded size of the budget, plus slack
             if part.content_type == "message/rfc822":
@@ -1227,28 +1303,46 @@ class MailService:
             items.append((info, data))
         return items
 
-    async def send_draft(self, email: str, uid: int, folder: str = "drafts") -> SendResult:
+    async def send_draft(
+        self, email: str, uid: int, folder: str = "drafts", allow_duplicate: bool = False
+    ) -> SendResult:
         """Send a stored draft as it is (e.g. one made by `create_draft` that the owner
-        reviewed), then remove it from its folder."""
+        reviewed), then remove it from its folder.
+
+        Only a real draft of this account is sent: it must carry the \\Draft flag, and its
+        From (and Sender, if any) must be the account's own address, so a received email
+        moved into Drafts cannot be re-sent under someone else's name. Calls for the same
+        draft run one at a time, and a draft whose Message-ID was sent within the hour is
+        refused (see `SendJournal`)."""
         account = self._sender(email)
+        key = (account.email, folder.strip().lower(), uid)
+        entry = self._draft_locks.setdefault(key, _DraftLock())
+        entry.users += 1
+        try:
+            async with entry.lock:
+                return await self._send_draft(account, uid, folder, allow_duplicate)
+        finally:
+            entry.users -= 1
+            if entry.users == 0:
+                del self._draft_locks[key]
+
+    async def _send_draft(
+        self, account: Account, uid: int, folder: str, allow_duplicate: bool
+    ) -> SendResult:
+        own = _own_addresses(account)
 
         def read() -> tuple[str, StoredDraft]:
             with self.pool.session(account.email) as c:
-                folders = c.list_folders()
-                name = resolve_folder(folders, folder)
-                try:
-                    drafts = resolve_folder(folders, "drafts", special_use_first=True)
-                except FolderNotFound:
-                    drafts = None
+                name = resolve_folder(c.list_folders(), folder)
                 c.select_folder(name, readonly=True)
                 fetched = c.fetch([uid], ["FLAGS", "RFC822.SIZE"])
                 if uid not in fetched:
                     raise LookupError("message not found")
                 flags = fetched[uid].get(b"FLAGS") or ()
-                if imapclient.DRAFT not in flags and name != drafts:
+                if imapclient.DRAFT not in flags:
                     raise ValueError(
-                        f"uid {uid} in {name} is not a draft (no \\Draft flag and not in the "
-                        "Drafts folder); send_draft only sends drafts"
+                        f"uid {uid} in {name} is not a draft (it has no \\Draft flag); "
+                        "send_draft only sends drafts"
                     )
                 size = fetched[uid].get(b"RFC822.SIZE") or 0
                 if size > MAX_DRAFT_BYTES:
@@ -1260,6 +1354,11 @@ class MailService:
                     return name, prepare_stored_draft(raw, account.email)
 
         draft_folder, draft = await self._run(read)
+        if not draft.senders or any(s not in own for s in draft.senders):
+            raise ValueError(
+                f"the draft's From is not this account ({account.email}); send_draft only "
+                "sends the account's own drafts"
+            )
 
         def remove(c, folders, result: SendResult) -> None:
             result.draft_removed = False
@@ -1282,11 +1381,17 @@ class MailService:
                 return
             result.draft_removed = True
 
+        keys = {
+            _content_key(account.email, "draft-id", draft.message_id): JOURNAL_TTL,
+            _content_key(account.email, "draft-uid", draft_folder, uid): DUPLICATE_WINDOW,
+        }
         result = await self._deliver(
             account,
             draft.recipients.envelope,
             draft.sent_copy,
             draft.message_id,
+            keys=keys,
+            allow_duplicate=allow_duplicate,
             after=remove,
         )
         if result.draft_removed is None:  # the IMAP step after sending never got that far
@@ -1300,39 +1405,88 @@ class MailService:
         sent_copy: bytes,
         message_id: str,
         *,
+        keys: dict[str, float],
+        allow_duplicate: bool = False,
         flag_original: tuple[str, int, bytes | str] | None = None,
         after: Callable[[object, list, SendResult], None] | None = None,
     ) -> SendResult:
         """Send once over SMTP (Bcc stripped), then file the copy in Sent and do `after`
-        over IMAP. Once the email is out, nothing that follows raises: problems become
-        warnings in the result."""
-        self.send_limiter.acquire(account.email)
-        outcome = await self._run(
-            lambda: self.smtp.send(account.email, account.email, envelope, without_bcc(sent_copy)),
-            timeout=self.send_timeout,
-        )
-        result = SendResult(
-            account=account.email,
-            message_id=message_id,
-            recipients=len(envelope) - len(outcome.refused),
-            saved_to_sent=False,
-            sent_folder=None,
-        )
-        if outcome.refused:
-            refused = "; ".join(f"{a}: {r}" for a, r in outcome.refused.items())
-            result.warnings.append(f"these recipients were refused and did not get it: {refused}")
+        over IMAP, all in ONE worker thread: a caller that gives up (timeout, cancelled
+        call) never skips the Sent copy or the journal record. Once the email is out,
+        nothing that follows raises: problems become warnings in the result.
 
+        A message over HEAVY_MESSAGE_BYTES is sent under the heavy-work gate, so one large
+        send (tens of MB in flight) never overlaps another large job."""
+        self.journal.begin(keys, allow_duplicate)
+        try:
+            self.send_limiter.acquire(account.email)
+        except BaseException:
+            self.journal.finish(keys, None)
+            raise
         gmail = _gmail_files_sent_mail(account)
-        if gmail:
-            result.saved_to_sent, result.sent_folder = True, "sent"
-        if gmail and flag_original is None and after is None:
+
+        def work() -> SendResult:
+            outcome_state = None
+            try:
+                with _heavy_if(len(sent_copy) > HEAVY_MESSAGE_BYTES):
+                    maybe: SmtpMaybeSent | None = None
+                    try:
+                        outcome = self.smtp.send(
+                            account.email, account.email, envelope, without_bcc(sent_copy)
+                        )
+                    except SmtpMaybeSent as e:
+                        maybe, outcome = e, SendOutcome()
+                    outcome_state = MAYBE_SENT if maybe else SENT
+                    result = SendResult(
+                        account=account.email,
+                        message_id=message_id,
+                        recipients=len(envelope) - len(outcome.refused),
+                        saved_to_sent=False,
+                        sent_folder=None,
+                    )
+                    if outcome.refused:
+                        refused = "; ".join(f"{a}: {r}" for a, r in outcome.refused.items())
+                        result.warnings.append(
+                            f"these recipients were refused and did not get it: {refused}"
+                        )
+                    if maybe is None:
+                        self._after_send(account, gmail, sent_copy, result, flag_original, after)
+                    elif not gmail:
+                        self._after_send(account, False, sent_copy, result, None, None, True)
+            finally:
+                self.journal.finish(keys, outcome_state)
+            if maybe is not None:
+                raise SmtpMaybeSent(_maybe_sent_message(maybe, result)) from maybe
             return result
 
-        def bookkeeping() -> None:
+        try:
+            return await self._run(work, timeout=self.send_timeout)
+        except TimeoutError as e:
+            raise SendTimeout(
+                "the mail server did not respond in time; the email may already have been sent"
+            ) from e
+
+    def _after_send(
+        self,
+        account: Account,
+        gmail: bool,
+        sent_copy: bytes,
+        result: SendResult,
+        flag_original: tuple[str, int, bytes | str] | None,
+        after: Callable[[object, list, SendResult], None] | None,
+        maybe_sent: bool = False,
+    ) -> None:
+        """The IMAP bookkeeping after a send (runs in the send's worker thread). Never
+        raises: the email is already out."""
+        if gmail:
+            result.saved_to_sent, result.sent_folder = True, "sent"
+            if flag_original is None and after is None:
+                return
+        try:
             with self.pool.session(account.email) as c:
                 folders = c.list_folders()
                 if not gmail:
-                    self._file_in_sent(c, folders, sent_copy, result)
+                    self._file_in_sent(c, folders, sent_copy, result, maybe_sent)
                 if flag_original is not None:
                     folder, uid, keyword = flag_original
                     try:
@@ -1344,27 +1498,32 @@ class MailService:
                         pass  # best effort: the flag is a courtesy to the owner's mail app
                 if after is not None:
                     after(c, folders, result)
-
-        try:
-            await self._run(bookkeeping)
-        except TimeoutError:
-            result.warnings.append(
-                "the email was sent, but the mail server did not respond in time afterwards; "
-                "the copy in Sent may be missing"
-            )
-        except Exception as e:  # noqa: BLE001 -- the send itself succeeded: report, don't raise
+        except Exception as e:  # noqa: BLE001 -- the send itself happened: report, don't raise
             result.warnings.append(f"the email was sent, but updating the mailbox failed: {e}")
-        return result
 
     @staticmethod
-    def _file_in_sent(c, folders, sent_copy: bytes, result: SendResult) -> None:
+    def _file_in_sent(
+        c, folders, sent_copy: bytes, result: SendResult, maybe_sent: bool = False
+    ) -> None:
         try:
             sent = resolve_folder(folders, "sent", special_use_first=True)
         except FolderNotFound:
             result.warnings.append("the email was sent, but no Sent folder was found for a copy")
             return
+        flags: tuple = (imapclient.SEEN,)
+        if maybe_sent:
+            flags = (imapclient.SEEN, MAYBE_SENT_KEYWORD)
+        now = datetime.now(UTC)
         try:
-            c.append(sent, sent_copy, flags=(imapclient.SEEN,), msg_time=datetime.now(UTC))
+            try:
+                c.append(sent, sent_copy, flags=flags, msg_time=now)
+            except IMAPClientAbortError:
+                raise
+            except IMAPClientError:
+                if not maybe_sent:
+                    raise
+                # A server without keywords refuses the flag: file the copy without it.
+                c.append(sent, sent_copy, flags=(imapclient.SEEN,), msg_time=now)
         except IMAPClientAbortError:
             raise
         except IMAPClientError as e:

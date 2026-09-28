@@ -204,3 +204,5 @@ async def test_google_connect_flow(env):
     assert r.status_code == 303 and "google_connected" in r.headers["location"]
     a = services.repo.get("me@gmail.com")
     assert a.provider == Provider.GOOGLE and services.repo.get_secret("me@gmail.com") == "rt-new"
+    # Sending is opt-in: a newly connected Google account may not send yet.
+    assert a.mail_access == "organize" and not a.can_send

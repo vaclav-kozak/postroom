@@ -294,3 +294,31 @@ def test_rfc_partial_response_parses_to_the_origin_key():
     line = (b"1 (UID 7 BODY[1.1]<0> {%d}" % len(body), body)
     parsed = parse_fetch_response([line, b")"], uid_is_key=True)
     assert service._section(parsed[7], "1.1") == body
+
+
+# -- forwarding a large email: the attachment budget counts decoded bytes (M7) --------------
+
+
+def _with_attachment(size: int) -> bytes:
+    from email.message import EmailMessage
+
+    m = EmailMessage()
+    m["From"], m["To"], m["Subject"] = "p@example.org", "a@x.cz", "big"
+    m.set_content("see attached")
+    m.add_attachment(bytes(range(256)) * (size // 256), maintype="application", subtype="pdf")
+    return m.as_bytes()
+
+
+def test_large_forward_budget_counts_decoded_bytes(monkeypatch):
+    size = 64 * 1024
+    raw = _with_attachment(size)
+    server = SectionServer(raw)
+    structure = bodystructure(server.msg)
+    # Between the decoded size and the base64 size: it fits.
+    monkeypatch.setattr(service, "MAX_FORWARD_ATTACHMENT_BYTES", size + 1024)
+    ((_info, data),) = MailService._large_attachments(server, 1, structure)
+    assert len(data) == size
+    # Below the decoded size: refused, before or after the fetch.
+    monkeypatch.setattr(service, "MAX_FORWARD_ATTACHMENT_BYTES", size - 1024)
+    with pytest.raises(ValueError, match="forward it with include_attachments=false"):
+        MailService._large_attachments(server, 1, structure)

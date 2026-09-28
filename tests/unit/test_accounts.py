@@ -1,4 +1,4 @@
-from postroom.accounts import AccountStatus, Provider
+from postroom.accounts import AccountStatus, MailAccess, Provider
 
 
 def test_upsert_and_get_case_insensitive(repo):
@@ -92,6 +92,10 @@ def test_capabilities(repo):
         imap_port=993,
         imap_security="ssl",
     )
+    # Sending is opt-in: a new account may read and organise, not send.
+    assert g.mail_access == MailAccess.ORGANIZE and not g.can_send
+    assert g.capabilities == ["mail", "mail.organize", "calendar", "tasks", "contacts"]
+    g = repo.upsert(email="g@gmail.com", provider=Provider.GOOGLE, mail_access=MailAccess.FULL)
     assert g.is_gmail and g.capabilities == [
         "mail",
         "mail.organize",
@@ -109,6 +113,7 @@ def test_capabilities(repo):
         caldav_url="https://h/SOGo/dav/s@x.cz/",
         carddav_url="https://h/SOGo/dav/s@x.cz/",
         smtp_host="smtp.example.org",
+        mail_access=MailAccess.FULL,
     )
     assert s.capabilities == [
         "mail",
@@ -124,6 +129,7 @@ def test_capabilities(repo):
         imap_host="imap.example.org",
         imap_port=143,
         imap_security="starttls",
+        mail_access=MailAccess.FULL,
     )
     # No outgoing server: no sending, whatever the access level.
     assert f.capabilities == ["mail", "mail.organize"] and not f.is_gmail

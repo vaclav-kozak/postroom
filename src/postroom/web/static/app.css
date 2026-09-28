@@ -1148,6 +1148,9 @@ details.remove[open] summary {
   flex: 1 1 16rem;
   max-width: 24rem;
 }
+.bulk-access .field {
+  max-width: 40rem;
+}
 details.advanced {
   margin-top: var(--s-6);
 }

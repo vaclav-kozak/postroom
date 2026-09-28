@@ -177,7 +177,7 @@ def fake(**kw):
 
 
 def test_capabilities_follow_the_access_level(repo, accounts):
-    assert repo.get(A).mail_access == MailAccess.FULL
+    assert repo.get(A).mail_access == MailAccess.ORGANIZE  # the default
     repo.set_mail_access(A, MailAccess.ORGANIZE)
     assert repo.get(A).capabilities == ["mail", "mail.organize"]
     assert repo.get(A).can_send is False
@@ -201,7 +201,7 @@ def test_upsert_keeps_mail_access_unless_given(repo, accounts):
     acc = repo.upsert(email=A, provider=Provider.IMAP, mail_access=MailAccess.ORGANIZE)
     assert acc.mail_access == MailAccess.ORGANIZE
     new = repo.upsert(email="new@example.com", provider=Provider.IMAP)
-    assert new.mail_access == MailAccess.FULL
+    assert new.mail_access == MailAccess.ORGANIZE
 
 
 async def test_read_only_account_is_refused_and_not_contacted(repo, accounts):

@@ -23,7 +23,7 @@ from starlette.responses import RedirectResponse, Response
 from postroom.accounts import Account, AccountStatus, MailAccess, Provider, SmtpStatus
 from postroom.crypto import SecretError, new_token, pkce_pair
 from postroom.google.oauth import GoogleOAuthError
-from postroom.mail.imap import ImapError
+from postroom.mail.imap import LOGIN_LOCK_TIMEOUT, ImapError
 from postroom.mail.smtp import SmtpError
 from postroom.web.pages import form_data, login_redirect, message_page, render
 
@@ -47,6 +47,8 @@ MESSAGES = {
     "key_revoked": "API key revoked.",
     "client_revoked": "Client access revoked.",
     "key_name_invalid": "API key name must be 1–60 characters.",
+    "access_all_set": "Access level updated for all accounts.",
+    "access_invalid": "Choose an access level.",
 }
 
 GSTATE_COOKIE = "postroom_gstate"
@@ -105,11 +107,12 @@ class AccountForm:
     smtp_port: str = "465"
     smtp_security: str = "ssl"
     smtp_username: str = ""
-    mail_access: str = MailAccess.FULL.value
+    # Sending is opt-in: a new account starts at organize; "full" is the owner's choice.
+    mail_access: str = MailAccess.ORGANIZE.value
 
     @classmethod
     def from_form(
-        cls, form: dict[str, str], mail_access: str = MailAccess.FULL.value
+        cls, form: dict[str, str], mail_access: str = MailAccess.ORGANIZE.value
     ) -> AccountForm:
         """`mail_access` is used when the form has no access level (e.g. an older page)."""
 
@@ -305,9 +308,20 @@ def register_admin(mcp: FastMCP, services: Services) -> None:
         )
 
     async def test_login(f: AccountForm, password: str) -> str | None:
-        """One login + logout with the submitted settings; returns an error text or None."""
+        """One IMAP login + logout, then (with an outgoing server) one SMTP login + QUIT with
+        the submitted settings; returns an error text or None. Each holds the account's
+        login lock, like every other login (fail2ban), and nothing is sent."""
 
-        def work() -> None:
+        def locked(fn) -> None:
+            lock = services.pool.locks.account(f.email)
+            if not lock.acquire(timeout=LOGIN_LOCK_TIMEOUT):
+                raise ImapError("the account is busy logging in; try again in a moment")
+            try:
+                fn()
+            finally:
+                lock.release()
+
+        def imap() -> None:
             client = services.pool.connector.connect(f.to_account(), password)
             try:
                 client.logout()
@@ -315,15 +329,13 @@ def register_admin(mcp: FastMCP, services: Services) -> None:
                 pass
 
         try:
-            await asyncio.to_thread(work)
+            await asyncio.to_thread(locked, imap)
         except Exception as e:  # noqa: BLE001 -- any failure is shown to the owner
             return f"Test login failed — {_safe_error(e)}"
         if f.smtp_host:
-            # One SMTP login + QUIT with the submitted settings; nothing is sent.
+            smtp_check = services.mail.smtp.connector.check
             try:
-                await asyncio.to_thread(
-                    services.mail.smtp.connector.check, f.to_account(), password
-                )
+                await asyncio.to_thread(locked, lambda: smtp_check(f.to_account(), password))
             except Exception as e:  # noqa: BLE001 -- any failure is shown to the owner
                 return f"SMTP test failed — {_safe_error(e)}"
         return None
@@ -342,6 +354,7 @@ def register_admin(mcp: FastMCP, services: Services) -> None:
             "admin.html",
             flash=MESSAGES.get(request.query_params.get("msg", "")),
             accounts=services.repo.list(),
+            access_levels=ACCESS_LEVELS,
             clients=services.provider.list_clients(),
             api_keys=[k for k in services.provider.list_api_keys() if not k.revoked],
             mcp_url=settings.mcp_url,
@@ -465,6 +478,15 @@ def register_admin(mcp: FastMCP, services: Services) -> None:
             if error is not None:
                 return back("check_smtp_failed")
         return back("check_ok")
+
+    @owner_post("/admin/accounts/access")
+    async def access_all(request: Request, form: dict[str, str]) -> Response:
+        """Set the mail access level of every account at once (`set-access --all`)."""
+        level = form.get("mail_access", "").strip()
+        if level not in {m.value for m in MailAccess}:
+            return back("access_invalid")
+        services.repo.set_mail_access_all(level)
+        return back("access_all_set")
 
     @owner_post("/admin/accounts/{id:int}/toggle")
     async def account_toggle(request: Request, form: dict[str, str]) -> Response:

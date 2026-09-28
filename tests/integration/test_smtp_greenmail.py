@@ -9,7 +9,7 @@ from email.policy import default
 
 import pytest
 
-from postroom.accounts import Provider, SmtpStatus
+from postroom.accounts import MailAccess, Provider, SmtpStatus
 from postroom.mail.imap import ImapConnector, ImapPool
 from postroom.mail.service import MailService
 from postroom.mail.smtp import SmtpConnector, SmtpSender
@@ -27,6 +27,7 @@ def smtp_account(repo, gm_account, greenmail_smtps):
         smtp_host=host,
         smtp_port=port,
         smtp_security="ssl",
+        mail_access=MailAccess.FULL,  # sending is opt-in
     )
     return USER
 

@@ -86,6 +86,24 @@ def test_broken_charset_does_not_crash():
     assert "broken" in p.body_text
 
 
+def test_format_address_quotes_names_with_specials():
+    from email.policy import default
+
+    assert parse.format_address("Doe, John", "j@example.org") == '"Doe, John" <j@example.org>'
+    assert parse.format_address('Pat "P" O\\N', "p@example.org") == (
+        '"Pat \\"P\\" O\\\\N" <p@example.org>'
+    )
+    assert parse.format_address("Plain Name", "x@example.org") == "Plain Name <x@example.org>"
+    assert parse.format_address("", "x@example.org") == "x@example.org"
+    # A comma inside a quoted name no longer splits one address into two.
+    header = ", ".join([parse.format_address("Doe, John", "j@example.org"), "Roe <r@example.org>"])
+    msg = email.message_from_bytes(f"To: {header}\r\n\r\n".encode(), policy=default)
+    assert [a.addr_spec for a in msg["To"].addresses] == ["j@example.org", "r@example.org"]
+    assert msg["To"].addresses[0].display_name == "Doe, John"
+    addrs = [Address(b"Doe, John", None, b"j", b"example.org")]
+    assert parse.format_addresses(addrs) == ['"Doe, John" <j@example.org>']
+
+
 def test_format_addresses_and_decode():
     addrs = (
         Address(b"=?utf-8?q?Tom=C3=A1=C5=A1?=", None, b"v", b"x.cz"),

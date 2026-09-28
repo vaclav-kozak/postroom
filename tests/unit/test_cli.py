@@ -3,8 +3,6 @@ import io
 import os
 import stat
 
-import pytest
-
 from postroom import cli
 from postroom.crypto import verify_password
 from tests.unit.test_emclient import PASS, XML
@@ -162,7 +160,8 @@ def test_set_access(monkeypatch, settings, capsys):
 
     repo = AccountRepo(Database(settings.db_path), SecretBox(settings.master_key))
     repo.upsert(email="user@example.com", provider=Provider.IMAP)
-    assert repo.get("user@example.com").mail_access == MailAccess.FULL
+    # Sending is opt-in: a new account starts at organize.
+    assert repo.get("user@example.com").mail_access == MailAccess.ORGANIZE
 
     assert cli.main(["set-access", "User@Example.com", "read"]) == 0
     assert capsys.readouterr().out == "user@example.com\tread\n"
@@ -178,7 +177,27 @@ def test_set_access(monkeypatch, settings, capsys):
     assert cli.main(["set-access", "nobody@example.com", "full"]) == 1
     assert "unknown account: nobody@example.com" in capsys.readouterr().err
 
-    with pytest.raises(SystemExit) as e:
-        cli.main(["set-access", "user@example.com", "admin"])
-    assert e.value.code == 2
+    assert cli.main(["set-access", "user@example.com", "admin"]) == 2
+    assert "unknown access level 'admin'" in capsys.readouterr().err
     assert repo.get("user@example.com").mail_access == MailAccess.ORGANIZE
+
+
+def test_set_access_all(monkeypatch, settings, capsys):
+    _env(monkeypatch, settings)
+    from postroom.accounts import AccountRepo, MailAccess, Provider
+    from postroom.crypto import SecretBox
+    from postroom.db import Database
+
+    repo = AccountRepo(Database(settings.db_path), SecretBox(settings.master_key))
+    repo.upsert(email="a@example.com", provider=Provider.IMAP)
+    repo.upsert(email="b@example.com", provider=Provider.GOOGLE, mail_access=MailAccess.READ)
+
+    assert cli.main(["set-access", "--all", "full"]) == 0
+    assert capsys.readouterr().out == "2 accounts\tfull\n"
+    assert {a.mail_access for a in repo.list()} == {MailAccess.FULL}
+
+    # --all takes only the level; the per-account form needs both.
+    assert cli.main(["set-access", "--all", "a@example.com", "read"]) == 2
+    assert cli.main(["set-access", "read"]) == 2
+    assert cli.main(["set-access", "--all", "admin"]) == 2
+    assert {a.mail_access for a in repo.list()} == {MailAccess.FULL}

@@ -49,10 +49,6 @@ SERVER_INSTRUCTIONS = (
     " with calendar/contacts capability; they never invite attendees."
 )
 
-# The MCP SDK rejects request bodies over 4 MiB; send_email carries attachments of up to
-# 10 MiB (about 14 MB as base64 in JSON). Only /mcp gets the larger limit.
-MCP_MAX_BODY_BYTES = 16 * 1024 * 1024
-
 log = logging.getLogger(__name__)
 
 CheckAccount = Callable[[str, bool], Awaitable[AccountStatus]]
@@ -96,7 +92,9 @@ def build_services(settings: Settings) -> Services:
     smtp = SmtpSender(
         repo,
         SmtpConnector(
-            google_token=google_token, local_hostname=urlparse(settings.base_url).hostname
+            google_token=google_token,
+            google_invalidate=google.invalidate if google else None,
+            local_hostname=urlparse(settings.base_url).hostname,
         ),
         locks=pool.locks,
     )
@@ -157,29 +155,6 @@ def build_mcp(services: Services, auth=None) -> FastMCP:
     return mcp
 
 
-def raise_mcp_body_limit(app: Starlette, max_bytes: int = MCP_MAX_BODY_BYTES) -> bool:
-    """Raise the MCP SDK's request body limit on /mcp to `max_bytes`.
-
-    FastMCP creates the SDK's session manager (whose `asgi_app` is the SDK's
-    `RequestBodyLimitMiddleware`) in its lifespan and has no setting for the limit, so it
-    is set here, after startup. Returns False (and logs) when the layout was not found.
-    """
-    for route in app.router.routes:
-        if getattr(route, "path", None) != "/mcp":
-            continue
-        node = getattr(route, "app", None)
-        for _ in range(8):
-            if node is None:
-                break
-            limiter = getattr(getattr(node, "session_manager", None), "asgi_app", None)
-            if limiter is not None and hasattr(limiter, "max_body_size"):
-                limiter.max_body_size = max(limiter.max_body_size, max_bytes)
-                return True
-            node = getattr(node, "app", None)
-    log.warning("could not raise the /mcp request body limit; large attachments will fail")
-    return False
-
-
 def _own_task_lifespan(
     inner: Callable[[Starlette], AbstractAsyncContextManager],
 ) -> Callable[[Starlette], AbstractAsyncContextManager]:
@@ -198,7 +173,6 @@ def _own_task_lifespan(
 
         async def hold() -> None:
             async with inner(app) as value:
-                raise_mcp_body_limit(app)
                 state.append(value)
                 ready.set()
                 await stop.wait()

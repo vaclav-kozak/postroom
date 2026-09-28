@@ -3,7 +3,7 @@
 Google accounts), the dashboard row, and "Test now" checking SMTP (never the background
 checker). smtplib is faked (tests.unit.test_smtp)."""
 
-import smtplib
+import base64
 
 import pytest
 
@@ -16,12 +16,19 @@ G = "me@gmail.com"
 
 
 class PasswordSMTP(FakeSMTPSSL):
-    """Accepts only the password "good"."""
+    """Accepts only the password `good_password` (AUTH PLAIN)."""
 
-    def login(self, user, password):
-        self.calls.append(("login", user, password))
-        if password != "good":
-            raise smtplib.SMTPAuthenticationError(535, b"5.7.8 bad credentials")
+    good_password = "good"
+
+    def docmd(self, cmd, args=""):
+        if cmd.upper() == "AUTH" and args.startswith("PLAIN "):
+            password = base64.b64decode(args[6:]).split(b"\0")[2].decode()
+            self.auth_reply = (
+                (235, b"2.7.0 accepted")
+                if password == self.good_password
+                else (535, b"5.7.8 bad credentials")
+            )
+        return super().docmd(cmd, args)
 
 
 @pytest.fixture
@@ -67,7 +74,8 @@ async def test_form_has_smtp_and_access_sections(env):
     assert "Search and read mail, and create drafts." in page
     assert "mark read or unread, star, move, archive, trash, and create folders" in page
     assert "Also send mail" in page
-    assert 'value="full" checked' in page
+    # Sending is opt-in: a new account starts at "organize".
+    assert 'value="organize" checked' in page and 'value="full" checked' not in page
 
 
 async def test_add_account_with_smtp(env, smtp):
@@ -85,8 +93,8 @@ async def test_add_account_with_smtp(env, smtp):
     assert a.mail_access == MailAccess.ORGANIZE and not a.can_send
     # One SMTP login with the account password, then QUIT; nothing sent.
     (s,) = smtp
-    assert s.names() == ["ehlo", "login", "quit"]
-    assert s.calls[1] == ("login", "sender", "good")
+    assert s.names() == ["ehlo", "auth", "quit"]
+    assert s.calls[1] == ("auth", "PLAIN", b"\0sender\0good")
 
 
 async def test_add_account_full_access_can_send(env, smtp):
@@ -98,16 +106,12 @@ async def test_add_account_full_access_can_send(env, smtp):
 
 async def test_bad_smtp_login_saves_nothing(env, smtp, monkeypatch):
     c, services, _ = env
-    monkeypatch.setattr(PasswordSMTP, "login", _always_fail)
+    monkeypatch.setattr(PasswordSMTP, "good_password", "never")
     r = await add(c, "s@example.com")
     assert r.status_code == 200
     assert "SMTP test failed — SMTP: authentication failed (535 5.7.8 bad credentials)" in r.text
     assert "good" not in r.text.split("SMTP test failed")[1][:200]
     assert services.repo.get("s@example.com") is None
-
-
-def _always_fail(self, user, password):
-    raise smtplib.SMTPAuthenticationError(535, b"5.7.8 bad credentials")
 
 
 async def test_no_smtp_host_means_no_smtp_login(env, smtp):
@@ -196,6 +200,7 @@ def google_account(env):
         imap_security="ssl",
         secret="refresh",
         status=AccountStatus.CONNECTED,
+        mail_access=MailAccess.FULL,
     )
     return services.repo.get(G)
 
@@ -258,7 +263,7 @@ async def test_test_now_checks_smtp_and_reports_it_separately(env, smtp, monkeyp
     c, services, _ = env
     await add(c, "s@example.com")
     a = services.repo.get("s@example.com")
-    monkeypatch.setattr(PasswordSMTP, "login", _always_fail)
+    monkeypatch.setattr(PasswordSMTP, "good_password", "never")
     page = await c.get("/admin")
     r = await c.post(f"/admin/accounts/{a.id}/test", data={"csrf": csrf(page.text)})
     assert r.headers["location"] == "/admin?msg=check_smtp_failed"
@@ -330,3 +335,68 @@ def test_consent_grants_follow_the_account_levels(env, smtp, google_account):
     services.repo.set_mail_access(G, MailAccess.READ)
     grants = consent_grants(services.repo.list(include_disabled=False))
     assert grants["send"].startswith("Sending is enabled on 1 account:")
+
+
+# -- the test login holds the account's login lock ------------------------------------------
+
+
+async def test_test_login_holds_the_login_lock(env, smtp, monkeypatch):
+    c, services, _ = env
+    held = []
+    lock = services.pool.locks.account("s@example.com")
+    connect = services.pool.connector.connect
+
+    def imap_connect(account, secret):
+        held.append(("imap", lock.locked()))
+        return connect(account, secret)
+
+    original = PasswordSMTP.docmd
+
+    def smtp_docmd(self, cmd, args=""):
+        if cmd.upper() == "AUTH":
+            held.append(("smtp", lock.locked()))
+        return original(self, cmd, args)
+
+    monkeypatch.setattr(services.pool.connector, "connect", imap_connect)
+    monkeypatch.setattr(PasswordSMTP, "docmd", smtp_docmd)
+    r = await add(c, "s@example.com")
+    assert r.status_code == 303
+    assert held == [("imap", True), ("smtp", True)] and not lock.locked()
+
+
+async def test_test_login_waits_for_a_busy_account(env, smtp, monkeypatch):
+    c, services, attempts = env
+    monkeypatch.setattr("postroom.web.admin.LOGIN_LOCK_TIMEOUT", 0.05)
+    lock = services.pool.locks.account("s@example.com")
+    lock.acquire()
+    try:
+        r = await add(c, "s@example.com")
+    finally:
+        lock.release()
+    assert r.status_code == 200 and "the account is busy logging in" in r.text
+    assert attempts == [] and smtp == [] and services.repo.get("s@example.com") is None
+
+
+# -- one access level for every account -----------------------------------------------------
+
+
+async def test_set_access_for_all_accounts(env, smtp, google_account):
+    c, services, _ = env
+    await add(c, "s@example.com", mail_access="read")
+    page = (await c.get("/admin")).text
+    assert 'action="/admin/accounts/access"' in page and 'id="access-all"' in page
+    r = await c.post("/admin/accounts/access", data={"mail_access": "read"})
+    assert r.status_code == 403  # no CSRF token
+    r = await c.post("/admin/accounts/access", data={"csrf": csrf(page), "mail_access": "root"})
+    assert r.headers["location"] == "/admin?msg=access_invalid"
+    assert services.repo.get(G).mail_access == MailAccess.FULL
+    r = await c.post("/admin/accounts/access", data={"csrf": csrf(page), "mail_access": "full"})
+    assert r.headers["location"] == "/admin?msg=access_all_set"
+    assert {a.mail_access for a in services.repo.list()} == {MailAccess.FULL}
+    page = (await c.get("/admin?msg=access_all_set")).text
+    assert "Access level updated for all accounts." in page
+
+
+async def test_bulk_access_control_needs_two_accounts(env, google_account):
+    c, _, _ = env
+    assert 'id="access-all"' not in (await c.get("/admin")).text

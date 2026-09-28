@@ -103,9 +103,9 @@ async def test_list_accounts(server):
         res = await c.call_tool("list_accounts", {})
     acc = res.data[0] if isinstance(res.data, list) else res.structured_content["result"][0]
     assert acc["email"] == "a@x.cz"
-    # Full access, but no outgoing server configured: no sending.
+    # The default level: read and organise, no sending.
     assert acc["capabilities"] == ["mail", "mail.organize"]
-    assert acc["mail_access"] == "full"
+    assert acc["mail_access"] == "organize"
 
 
 async def test_search_maps_params(server):

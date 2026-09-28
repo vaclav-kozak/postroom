@@ -72,9 +72,9 @@ MIGRATIONS: dict[int, str] = {
     """,
     3: """
     -- Per-account mail access level: read (read + drafts), organize (+ flags, move, trash,
-    -- create folders), full (+ sending). Existing accounts get 'full': MCP clients ask the
-    -- user to approve every non-read-only tool call; the owner can lower it per account.
-    ALTER TABLE accounts ADD COLUMN mail_access TEXT NOT NULL DEFAULT 'full'
+    -- create folders), full (+ sending). Existing and new accounts get 'organize': sending
+    -- is opt-in, the owner raises an account to 'full' explicitly.
+    ALTER TABLE accounts ADD COLUMN mail_access TEXT NOT NULL DEFAULT 'organize'
         CHECK (mail_access IN ('read','organize','full'));
     """,
     4: """

@@ -85,10 +85,14 @@ def _smtp(
     if port_text and not (port_text.isdigit() and 1 <= int(port_text) <= 65535):
         return None
     port = int(port_text) if port_text else (465 if security == "ssl" else 587)
+    if port == 465:
+        security = "ssl"  # 465 is implicit TLS whatever the export calls it
     own_password = proto.findtext(f"{NS_ACC}Password")
     if own_password and decode_secret(own_password.strip(), mode, passphrase) != imap_password:
         return None
     login = (proto.findtext(f"{NS_ACC}LoginName") or "").strip()
+    if len(login) > 320 or any(ch.isspace() or not ch.isprintable() for ch in login):
+        return None
     return host, port, security, (login if login and login != imap_login else None)
 
 
@@ -189,10 +193,23 @@ def apply_import(repo: AccountRepo, accounts: list[ImportedAccount]) -> list[tup
             carddav_url=a.carddav_url,
             secret=a.password,
             status=status,
-            smtp_host=a.smtp_host,
-            smtp_port=a.smtp_port,
-            smtp_security=a.smtp_security,
-            smtp_username=a.smtp_username,
         )
+        if a.smtp_host:
+            outgoing = (a.smtp_host, a.smtp_port, a.smtp_security, a.smtp_username)
+            current = existing and (
+                existing.smtp_host,
+                existing.smtp_port,
+                existing.smtp_security,
+                existing.smtp_username,
+            )
+            if outgoing != current:
+                # New settings: the last SMTP check result (e.g. "SMTP OK") is cleared.
+                repo.set_smtp(
+                    a.email,
+                    host=a.smtp_host,
+                    port=a.smtp_port,
+                    security=a.smtp_security,
+                    username=a.smtp_username,
+                )
         actions.append((a.email, "updated" if existing else "created"))
     return actions

@@ -26,7 +26,10 @@ MAX_RECIPIENTS = 50
 MAX_ADDRESS_CHARS = 320
 MAX_SUBJECT_CHARS = 1000
 MAX_ATTACHMENTS = 20
-MAX_ATTACHMENT_BYTES = 10 * 1024 * 1024  # decoded, all attachments of one send_email
+# Decoded, all attachments of one send_email. They arrive inline as base64 in the tool call's
+# JSON, which the MCP server limits to 4 MiB per request: 2 MiB stays well under it. Larger
+# files go out with forward_email or send_draft, which read them on the server.
+MAX_ATTACHMENT_BYTES = 2 * 1024 * 1024
 MAX_FORWARD_ATTACHMENT_BYTES = 20 * 1024 * 1024  # decoded, all re-attached originals
 MAX_DRAFT_BYTES = 25 * 1024 * 1024
 MAX_FILENAME_CHARS = 200
@@ -41,12 +44,22 @@ _CONTENT_TYPE = re.compile(rf"{_TOKEN}/{_TOKEN}")
 _UNSAFE_FILENAME_CHARS = re.compile(
     "[\\x00-\\x1f\\x7f\\u200e\\u200f\\u202a-\\u202e\\u2066-\\u2069]"
 )
+_WHITESPACE = re.compile(r"\s")
+_EOL = re.compile(rb"\r\n|\r|\n")
 _FWD_PREFIX = re.compile(r"^\s*(fwd?|fw)\s*:", re.IGNORECASE)
 _RE_PREFIX = re.compile(r"^\s*re\s*:", re.IGNORECASE)
 
 
 class SendLimitExceeded(Exception):
     """The account has sent as many emails as the hourly limit allows."""
+
+
+class DuplicateSend(Exception):
+    """The same email was sent (or is still being sent) from the account moments ago."""
+
+
+class SendTimeout(TimeoutError):
+    """A send did not finish in time after it started: the email may already be out."""
 
 
 # -- headers and addresses -------------------------------------------------------------------
@@ -164,10 +177,11 @@ def reply_recipients(
     cc: list[str],
     reply_all: bool,
     own: set[str],
-) -> tuple[list[str], list[str]]:
-    """To and Cc of a reply. `to` defaults to the original's Reply-To, else its From.
-    With `reply_all`, the original's To and Cc (without the account's own addresses) are
-    added to Cc. Replying to one's own email goes to its recipients instead."""
+) -> tuple[list[str], list[str], list[str]]:
+    """(To, Cc, dropped) of a reply. `to` defaults to the original's Reply-To, else its
+    From. With `reply_all`, the original's To and Cc (without the account's own addresses)
+    are added to Cc; `dropped` lists the ones left out because they are not usable
+    addresses. Replying to one's own email goes to its recipients instead."""
     own = {o.lower() for o in own}
     to, cc = list(to), list(cc)
     extra: list[str] = []
@@ -183,17 +197,19 @@ def reply_recipients(
         extra = [*original.to, *original.cc]
 
     taken = {_addr_key(a) for a in (*to, *cc)}
+    dropped: list[str] = []
     for value in extra:
         key = _addr_key(value)
         if not key or key in own or key in taken:
-            continue
+            continue  # no address at all (e.g. "undisclosed-recipients:;"), or already in
         try:
             parse_recipient(value)
         except ValueError:
-            continue  # an unusable address in someone else's header: leave it out
+            dropped.append(value)  # an unusable address in someone else's header
+            continue
         taken.add(key)
         cc.append(value)
-    return to, cc
+    return to, cc, dropped
 
 
 # -- forwarding ------------------------------------------------------------------------------
@@ -264,6 +280,14 @@ def _field(item: object, name: str):
     return item.get(name) if isinstance(item, dict) else getattr(item, name, None)
 
 
+def _too_big_inline(limit_mib: int) -> str:
+    return (
+        f"attachments are larger than {limit_mib} MiB in total; for bigger files, forward an "
+        "email that has them (forward_email), or have the owner attach them to a draft and "
+        "send it with send_draft"
+    )
+
+
 def decode_attachments(items: Iterable[object] | None) -> list[OutgoingFile]:
     """Validate and decode `[{filename, content_type, content_base64}]`: at most
     MAX_ATTACHMENTS files and MAX_ATTACHMENT_BYTES decoded in total."""
@@ -279,9 +303,10 @@ def decode_attachments(items: Iterable[object] | None) -> list[OutgoingFile]:
         encoded = _field(item, "content_base64")
         if not isinstance(encoded, str) or not encoded:
             raise ValueError(f"attachment {i} ({filename}): content_base64 is required")
-        encoded = "".join(encoded.split())
+        if _WHITESPACE.search(encoded):
+            encoded = "".join(encoded.split())
         if total + len(encoded) * 3 // 4 > MAX_ATTACHMENT_BYTES + 3:
-            raise ValueError(f"attachments are larger than {limit_mib} MiB in total")
+            raise ValueError(_too_big_inline(limit_mib))
         try:
             data = base64.b64decode(encoded, validate=True)
         except (binascii.Error, ValueError):
@@ -290,7 +315,7 @@ def decode_attachments(items: Iterable[object] | None) -> list[OutgoingFile]:
             ) from None
         total += len(data)
         if total > MAX_ATTACHMENT_BYTES:
-            raise ValueError(f"attachments are larger than {limit_mib} MiB in total")
+            raise ValueError(_too_big_inline(limit_mib))
         files.append(OutgoingFile(filename, content_type, data))
     return files
 
@@ -303,6 +328,7 @@ class StoredDraft:
     sent_copy: bytes  # Bcc kept, a fresh Date; `without_bcc` gives what is transmitted
     recipients: Recipients
     message_id: str
+    senders: list[str]  # the addr-specs in From and Sender (lower case)
 
 
 def _split_header(raw: bytes) -> tuple[bytes, bytes]:
@@ -345,8 +371,12 @@ def prepare_stored_draft(
 ) -> StoredDraft:
     """Make a stored draft ready to send as-is: its body bytes stay untouched, the Date is
     set to now and a missing Message-ID is added. Bcc stays in this copy (filed in Sent);
-    `without_bcc` strips it for transmission."""
-    raw = re.sub(rb"\r?\n", b"\r\n", raw)
+    `without_bcc` strips it for transmission.
+
+    Every line ending (CRLF, a bare LF or a bare CR) becomes CRLF first, so the header parse
+    that finds the recipients and the field split that removes Bcc see the same lines (the
+    parser also breaks lines at a bare CR, `_split_fields` only at CRLF)."""
+    raw = _EOL.sub(b"\r\n", raw)
     header, body = _split_header(raw)
     parsed = BytesHeaderParser(policy=policy.default).parsebytes(header + b"\r\n\r\n")
 
@@ -362,6 +392,9 @@ def prepare_stored_draft(
         return [email.utils.formataddr(p) if p[0] else p[1] for p in pairs if p[1]]
 
     recipients = collect_recipients(addresses("to"), addresses("cc"), addresses("bcc"))
+    senders = [
+        addr.lower() for _name, addr in email.utils.getaddresses(values("from") + values("sender"))
+    ]
     ids = values("message-id")
     message_id = " ".join(ids[0].split()) if ids else ""
     date = f"Date: {email.utils.format_datetime(now or datetime.now(UTC))}".encode()
@@ -370,7 +403,12 @@ def prepare_stored_draft(
         message_id = email.utils.make_msgid(domain=account_email.rpartition("@")[2])
         lines.append(f"Message-ID: {message_id}".encode())
     lines += [line for name, line in _split_fields(header) if name != "date"]
-    return StoredDraft(sent_copy=_join(lines, body), recipients=recipients, message_id=message_id)
+    return StoredDraft(
+        sent_copy=_join(lines, body),
+        recipients=recipients,
+        message_id=message_id,
+        senders=[s for s in senders if s],
+    )
 
 
 # -- rate limit --------------------------------------------------------------------------------
@@ -405,3 +443,75 @@ class SendRateLimiter:
                     f"(POSTROOM_SEND_LIMIT_PER_HOUR); try again in about {wait} minutes"
                 )
             window.append(now)
+
+
+# -- duplicate guard -------------------------------------------------------------------------
+
+# How long a sent email blocks an identical one (the same content to the same recipients),
+# and how long any record is kept (a draft's Message-ID blocks it that long).
+DUPLICATE_WINDOW = 10 * 60
+JOURNAL_TTL = 60 * 60
+_IN_FLIGHT = "in_flight"
+SENT, MAYBE_SENT = "sent", "maybe_sent"  # `SendJournal.finish` outcomes
+
+
+class SendJournal:
+    """Emails that reached the SMTP server recently (in memory, per process, about an hour).
+
+    A model that retries after a timeout, or issues the same call twice in parallel, would
+    otherwise send the email twice. Each send is identified by keys (a hash of its content
+    and recipients; for a stored draft also its Message-ID), each with its own window:
+    `begin` refuses a send whose key is still being sent, or was sent within the window;
+    `finish` records the outcome (a send that failed before reaching the server is
+    forgotten). `allow_duplicate` skips the check, not the record."""
+
+    def __init__(self, clock: Callable[[], float] = time.monotonic):
+        self.clock = clock
+        self._entries: dict[str, tuple[float, str, float]] = {}  # key -> (at, state, window)
+        self._lock = threading.Lock()
+
+    def begin(self, keys: dict[str, float], allow_duplicate: bool = False) -> None:
+        """Reserve `keys` ({key: window seconds}) for a send about to start, or raise
+        `DuplicateSend`."""
+        now = self.clock()
+        with self._lock:
+            for key, (at, _state, _window) in list(self._entries.items()):
+                if now - at > JOURNAL_TTL:
+                    del self._entries[key]
+            if not allow_duplicate:
+                for key, window in keys.items():
+                    entry = self._entries.get(key)
+                    if entry is not None:
+                        at, state, _ = entry
+                        if state == _IN_FLIGHT or now - at < window:
+                            raise DuplicateSend(_duplicate_message(state, now - at))
+            for key, window in keys.items():
+                self._entries[key] = (now, _IN_FLIGHT, window)
+
+    def finish(self, keys: dict[str, float], outcome: str | None) -> None:
+        """`outcome`: "sent", "maybe_sent", or None when nothing reached the server."""
+        now = self.clock()
+        with self._lock:
+            for key, window in keys.items():
+                if outcome is None:
+                    self._entries.pop(key, None)
+                else:
+                    self._entries[key] = (now, outcome, window)
+
+
+def _duplicate_message(state: str, age: float) -> str:
+    again = (
+        "it was not sent again. Pass allow_duplicate=true only if the owner asked for a second copy"
+    )
+    if state == _IN_FLIGHT:
+        return (
+            "the same email is being sent from this account right now (an earlier call has "
+            f"not finished); {again}. Check the Sent folder (search_emails folder='sent') first"
+        )
+    minutes = max(1, round(age / 60))
+    if state == MAYBE_SENT:
+        return (
+            f"an attempt to send the same email {minutes} min ago may have gone through; "
+            f"{again}, after asking whether the recipients got it"
+        )
+    return f"the same email was sent from this account {minutes} min ago; {again}"

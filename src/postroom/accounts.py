@@ -96,7 +96,7 @@ class Account:
     last_ok_at: int | None
     last_check_at: int | None
     # Fail closed: an Account built without a level may only read. Stored accounts always
-    # carry theirs (the database default for them is "full").
+    # carry theirs (the database default for them is "organize": sending is opt-in).
     mail_access: MailAccess = MailAccess.READ
     # Outgoing mail (IMAP accounts only; no host = no sending). The password is the IMAP one.
     smtp_host: str | None = None
@@ -359,6 +359,16 @@ class AccountRepo:
                 "UPDATE accounts SET mail_access = ?, updated_at = ? WHERE email = ?",
                 (level.value, int(time.time()), email.strip().lower()),
             )
+        )
+
+    def set_mail_access_all(self, level: MailAccess | str) -> int:
+        """Set every account's mail access level; returns how many accounts there are.
+
+        Raises ValueError for an unknown level."""
+        level = MailAccess(level)
+        return self._db.execute(
+            "UPDATE accounts SET mail_access = ?, updated_at = ?",
+            (level.value, int(time.time())),
         )
 
     def set_smtp(

@@ -27,7 +27,11 @@ PASSWORD = "s3cret-pass"
 
 
 class FakeSMTP:
-    """Records what the client does; behaviour is set per test through class attributes."""
+    """Records what the client does; behaviour is set per test through class attributes.
+
+    AUTH is answered like a real server (PLAIN with an initial response; LOGIN as three
+    steps) and every attempt is recorded as one ("auth", mechanism, credentials) call, so
+    tests can count failed logins. DATA is recorded as ("data", the bytes on the wire)."""
 
     instances: ClassVar[list["FakeSMTP"]] = []
     extensions: ClassVar[dict[str, str]] = {
@@ -35,12 +39,12 @@ class FakeSMTP:
         "auth": "PLAIN LOGIN XOAUTH2",
         "8bitmime": "",
     }
-    login_error: Exception | None = None
+    auth_reply = (235, b"2.7.0 accepted")
     connect_error: Exception | None = None
     mail_reply = (250, b"2.1.0 ok")
     rcpt_replies: ClassVar[dict[str, tuple[int, bytes]]] = {}
+    data_cmd_reply = (354, b"go ahead")
     data_result: object = (250, b"2.0.0 queued")
-    docmd_reply = (235, b"2.7.0 accepted")
 
     def __init__(self, host, port, local_hostname=None, timeout=None, context=None):
         if self.connect_error is not None:
@@ -50,6 +54,8 @@ class FakeSMTP:
         self.calls: list[tuple] = []
         self.esmtp_features = dict(self.extensions)
         self.sock = None
+        self._login_steps: list[str] | None = None
+        self._wire: list[bytes] | None = None
         FakeSMTP.instances.append(self)
 
     def ehlo(self):
@@ -62,18 +68,44 @@ class FakeSMTP:
         self.calls.append(("starttls", context))
 
     def login(self, user, password):
-        self.calls.append(("login", user, password))
-        if self.login_error is not None:
-            raise self.login_error
+        raise AssertionError("smtplib's login() tries every mechanism; it must not be used")
 
     def auth(self, mechanism, authobject, initial_response_ok=True):
         self.calls.append(("auth", mechanism, authobject()))
-        if self.login_error is not None:
-            raise self.login_error
+        if self.auth_reply[0] != 235:
+            raise smtplib.SMTPAuthenticationError(*self.auth_reply)
 
     def docmd(self, cmd, args=""):
+        if cmd.upper() == "DATA":
+            if self.data_cmd_reply[0] == 354:
+                self._wire = []
+            return self.data_cmd_reply
+        if cmd.upper() == "AUTH" and args.startswith("PLAIN "):
+            self.calls.append(("auth", "PLAIN", base64.b64decode(args[6:])))
+            return self.auth_reply
+        if cmd.upper() == "AUTH" and args == "LOGIN":
+            self._login_steps = []
+            return (334, b"VXNlcm5hbWU6")
+        if self._login_steps is not None:
+            self._login_steps.append(base64.b64decode(cmd).decode())
+            if len(self._login_steps) == 1:
+                return (334, b"UGFzc3dvcmQ6")
+            self.calls.append(("auth", "LOGIN", self._login_steps))
+            self._login_steps = None
+            return self.auth_reply
         self.calls.append(("docmd", cmd, args))
-        return self.docmd_reply
+        return (250, b"ok")
+
+    def send(self, data):
+        assert self._wire is not None, "send() outside DATA"
+        self._wire.append(bytes(data))
+
+    def getreply(self):
+        wire, self._wire = b"".join(self._wire or []), None
+        self.calls.append(("data", wire))
+        if isinstance(self.data_result, Exception):
+            raise self.data_result
+        return self.data_result
 
     def mail(self, sender, options=()):
         self.calls.append(("mail", sender, list(options)))
@@ -82,12 +114,6 @@ class FakeSMTP:
     def rcpt(self, addr, options=()):
         self.calls.append(("rcpt", addr))
         return self.rcpt_replies.get(addr, (250, b"2.1.5 ok"))
-
-    def data(self, raw):
-        self.calls.append(("data", raw))
-        if isinstance(self.data_result, Exception):
-            raise self.data_result
-        return self.data_result
 
     def rset(self):
         self.calls.append(("rset",))
@@ -155,8 +181,8 @@ def test_ssl_login_then_quit(repo, accounts):
     assert isinstance(s, FakeSMTPSSL)
     assert (s.host, s.port, s.timeout) == ("smtp.example.com", 465, CONNECT_TIMEOUT)
     assert s.context is not None  # certificate-verifying default context
-    assert s.names() == ["ehlo", "login", "quit"]
-    assert s.calls[1] == ("login", A, PASSWORD)
+    assert s.names() == ["ehlo", "auth", "quit"]
+    assert s.calls[1] == ("auth", "PLAIN", b"\0" + A.encode() + b"\0" + PASSWORD.encode())
 
 
 def test_starttls_and_a_separate_username(repo, accounts):
@@ -165,9 +191,9 @@ def test_starttls_and_a_separate_username(repo, accounts):
     s = last()
     assert type(s) is FakeSMTP and s.port == 587
     assert s.local_hostname == "postroom.example.org"
-    assert s.names() == ["ehlo", "starttls", "ehlo", "login", "quit"]
+    assert s.names() == ["ehlo", "starttls", "ehlo", "auth", "quit"]
     assert s.calls[1][1] is not None
-    assert s.calls[3] == ("login", "u1", PASSWORD)
+    assert s.calls[3] == ("auth", "PLAIN", b"\0u1\0" + PASSWORD.encode())
 
 
 def test_starttls_not_offered_is_refused_before_login(repo, accounts):
@@ -175,11 +201,11 @@ def test_starttls_not_offered_is_refused_before_login(repo, accounts):
     FakeSMTP.extensions = {"auth": "PLAIN"}
     with pytest.raises(SmtpError, match="does not offer STARTTLS"):
         connector().check(repo.get(A), PASSWORD)
-    assert "login" not in last().names() and "quit" in last().names()
+    assert "auth" not in last().names() and "quit" in last().names()
 
 
 def test_auth_failure_is_mapped_without_the_password(repo, accounts):
-    FakeSMTPSSL.login_error = smtplib.SMTPAuthenticationError(535, b"5.7.8 bad credentials")
+    FakeSMTPSSL.auth_reply = (535, b"5.7.8 bad credentials")
     with pytest.raises(SmtpAuthFailed) as e:
         connector().check(repo.get(A), PASSWORD)
     assert "535 5.7.8 bad credentials" in str(e.value)
@@ -196,15 +222,51 @@ def test_connect_failure_names_the_server(repo, accounts):
 def test_non_ascii_password_uses_utf8_auth_plain(repo, accounts):
     pw = "heslo-žluťoučký"
     connector().check(repo.get(A), pw)
-    s = last()
-    (call,) = [c for c in s.calls if c[0] == "docmd"]
-    assert call[1] == "AUTH" and call[2].startswith("PLAIN ")
-    assert base64.b64decode(call[2][6:]) == b"\0" + A.encode() + b"\0" + pw.encode()
-    assert "login" not in s.names()
+    (call,) = [c for c in last().calls if c[0] == "auth"]
+    assert call == ("auth", "PLAIN", b"\0" + A.encode() + b"\0" + pw.encode())
+
+
+def test_login_mechanism_when_plain_is_not_offered(repo, accounts):
+    FakeSMTP.extensions = {"auth": "CRAM-MD5 LOGIN"}
+    connector().check(repo.get(A), "heslo-č")
+    (call,) = [c for c in last().calls if c[0] == "auth"]
+    assert call == ("auth", "LOGIN", [A, "heslo-č"])
+
+
+def test_no_supported_mechanism_is_a_clear_error(repo, accounts):
+    FakeSMTP.extensions = {"auth": "CRAM-MD5 GSSAPI"}
+    with pytest.raises(SmtpError, match="AUTH CRAM-MD5 GSSAPI; PLAIN or LOGIN is needed"):
+        connector().check(repo.get(A), PASSWORD)
+    assert "auth" not in last().names()
+
+
+def test_a_wrong_password_costs_exactly_one_auth_attempt(repo, accounts):
+    """smtplib's login() would try PLAIN, then LOGIN (and CRAM-MD5): two or three failed
+    logins per attempt on a mailcow server, which fail2ban counts."""
+    FakeSMTP.extensions = {"auth": "CRAM-MD5 PLAIN LOGIN"}
+    FakeSMTPSSL.auth_reply = (535, b"5.7.8 bad credentials")
+    s = sender(repo)
+    with pytest.raises(SmtpAuthFailed):
+        s.send(A, A, ["b@example.org"], b"x\r\n")
+    with pytest.raises(SmtpUnavailable):
+        s.send(A, A, ["b@example.org"], b"x\r\n")
+    attempts = [c for i in FakeSMTP.instances for c in i.calls if c[0] == "auth"]
+    assert len(attempts) == 1
+
+
+def test_temporary_auth_failure_does_not_pause_sending(repo, accounts):
+    FakeSMTPSSL.auth_reply = (454, b"4.7.0 Temporary authentication failure")
+    s = sender(repo)
+    with pytest.raises(SmtpError, match="temporary authentication failure") as e:
+        s.send(A, A, ["b@example.org"], b"x\r\n")
+    assert not isinstance(e.value, SmtpAuthFailed)
+    assert repo.get(A).smtp_status == SmtpStatus.ERROR
+    FakeSMTPSSL.auth_reply = (235, b"2.7.0 ok")
+    s.send(A, A, ["b@example.org"], b"x\r\n")  # not paused
 
 
 def test_non_ascii_password_rejected(repo, accounts):
-    FakeSMTPSSL.docmd_reply = (535, b"5.7.8 nope")
+    FakeSMTPSSL.auth_reply = (535, b"5.7.8 nope")
     with pytest.raises(SmtpAuthFailed, match="535"):
         connector().check(repo.get(A), "pässword")
 
@@ -223,7 +285,44 @@ def test_gmail_uses_xoauth2_with_the_imap_token(repo, accounts):
     (auth,) = [c for c in s.calls if c[0] == "auth"]
     assert auth[1] == "XOAUTH2"
     assert auth[2] == f"user={G}\x01auth=Bearer ya29.token\x01\x01"
-    assert "login" not in s.names()
+    assert len([c for c in s.calls if c[0] == "auth"]) == 1
+
+
+def test_gmail_refused_token_is_refreshed_once_and_never_pauses(repo, accounts):
+    tokens = iter(["ya29.stale", "ya29.fresh", "ya29.third"])
+    dropped = []
+
+    def token(email):
+        return next(tokens)
+
+    FakeSMTPSSL.auth_reply = (535, b"5.7.8 Username and Password not accepted")
+    c = connector(google_token=token, google_invalidate=dropped.append)
+    s = SmtpSender(repo, c, LoginLocks())
+    with pytest.raises(SmtpError, match="fresh access token too") as e:
+        s.send(G, G, ["b@example.org"], b"x\r\n")
+    assert not isinstance(e.value, SmtpAuthFailed)
+    assert dropped == [G]
+    bearer = [c[2] for i in FakeSMTP.instances for c in i.calls if c[0] == "auth"]
+    assert [b.split("Bearer ")[1].split("\x01")[0] for b in bearer] == ["ya29.stale", "ya29.fresh"]
+    assert repo.get(G).smtp_status == SmtpStatus.ERROR  # not auth_failed: not paused
+
+    # A stale token that works once refreshed: the send goes through.
+    FakeSMTP.instances = []
+    tokens2 = iter(["ya29.stale", "ya29.fresh"])
+
+    class OnlyFresh(FakeSMTPSSL):
+        def auth(self, mechanism, authobject, initial_response_ok=True):
+            self.calls.append(("auth", mechanism, authobject()))
+            if "stale" in self.calls[-1][2]:
+                raise smtplib.SMTPAuthenticationError(535, b"5.7.8 expired")
+
+    c = SmtpConnector(
+        google_token=lambda e: next(tokens2),
+        google_invalidate=dropped.append,
+        smtp_ssl_class=OnlyFresh,
+    )
+    assert SmtpSender(repo, c, LoginLocks()).send(G, G, ["b@example.org"], b"x\r\n").refused == {}
+    assert repo.get(G).smtp_status == SmtpStatus.OK
 
 
 def test_gmail_token_failure_is_an_smtp_error(repo, accounts):
@@ -259,8 +358,16 @@ def test_transmit_sends_the_bytes_as_given():
         ("mail", A, []),
         ("rcpt", "b@example.org"),
         ("rcpt", "c@example.org"),
-        ("data", raw),
+        ("data", raw + b".\r\n"),
     ]
+
+
+def test_data_dot_stuffs_lines_that_start_with_a_dot():
+    s = smtp_session()
+    raw = b".starts\r\nmid\r\n.\r\n..two\r\nend"
+    SmtpConnector.transmit(s, A, ["b@example.org"], raw)
+    assert s.calls[-1] == ("data", b"..starts\r\nmid\r\n..\r\n...two\r\nend\r\n.\r\n")
+    assert smtplib._quote_periods(raw) + b"\r\n.\r\n" == s.calls[-1][1]
 
 
 def test_transmit_8bit_uses_8bitmime():
@@ -295,7 +402,7 @@ def test_sender_refused():
 
 def test_data_refused_is_a_rejection():
     s = smtp_session()
-    FakeSMTP.data_result = smtplib.SMTPDataError(554, b"5.6.0 message refused")
+    FakeSMTP.data_cmd_reply = (554, b"5.6.0 message refused")
     with pytest.raises(SmtpRejected, match="554 5.6.0 message refused"):
         SmtpConnector.transmit(s, A, ["b@example.org"], b"x\r\n")
 
@@ -341,13 +448,13 @@ def sender(repo, **kw):
 def test_send_logs_in_transmits_and_records_ok(repo, accounts):
     out = sender(repo).send(A, A, ["b@example.org"], b"x\r\n")
     assert out.refused == {}
-    assert last().names() == ["ehlo", "login", "mail", "rcpt", "data", "quit"]
+    assert last().names() == ["ehlo", "auth", "mail", "rcpt", "data", "quit"]
     assert repo.get(A).smtp_status == SmtpStatus.OK
 
 
 def test_auth_failure_pauses_sending_until_a_manual_test(repo, accounts):
     s = sender(repo)
-    FakeSMTPSSL.login_error = smtplib.SMTPAuthenticationError(535, b"5.7.8 bad credentials")
+    FakeSMTPSSL.auth_reply = (535, b"5.7.8 bad credentials")
     with pytest.raises(SmtpAuthFailed):
         s.send(A, A, ["b@example.org"], b"x\r\n")
     acc = repo.get(A)
@@ -358,14 +465,14 @@ def test_auth_failure_pauses_sending_until_a_manual_test(repo, accounts):
         s.send(A, A, ["b@example.org"], b"x\r\n")
     assert len(FakeSMTP.instances) == count  # no second failed login
     # The owner's Test now logs in again; once it works, sending resumes.
-    FakeSMTPSSL.login_error = None
+    FakeSMTPSSL.auth_reply = (235, b"2.7.0 ok")
     assert s.check(A) is None
     assert repo.get(A).smtp_status == SmtpStatus.OK
     s.send(A, A, ["b@example.org"], b"x\r\n")
 
 
 def test_check_reports_the_error(repo, accounts):
-    FakeSMTPSSL.login_error = smtplib.SMTPAuthenticationError(535, b"5.7.8 bad credentials")
+    FakeSMTPSSL.auth_reply = (535, b"5.7.8 bad credentials")
     message = sender(repo).check(A)
     assert message.startswith("SMTP: authentication failed") and PASSWORD not in message
     assert repo.get(A).smtp_status == SmtpStatus.AUTH_FAILED
@@ -403,13 +510,9 @@ def test_login_holds_the_shared_login_lock(repo, accounts):
     seen = []
 
     class LockCheckingSMTP(FakeSMTPSSL):
-        def login(self, user, password):
+        def docmd(self, cmd, args=""):
             seen.append(lock.locked())
-            super().login(user, password)
-
-        def data(self, raw):
-            seen.append(lock.locked())
-            return super().data(raw)
+            return super().docmd(cmd, args)
 
     s = SmtpSender(repo, SmtpConnector(smtp_ssl_class=LockCheckingSMTP), locks)
     s.send(A, A, ["b@example.org"], b"x\r\n")

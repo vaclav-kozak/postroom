@@ -23,7 +23,7 @@ def insecure_ctx() -> ssl.SSLContext:
 
 
 @pytest.fixture(scope="session")
-def greenmail():
+def greenmail_container():
     c = (
         DockerContainer("greenmail/standalone:2.1.3")
         .with_env(
@@ -32,13 +32,27 @@ def greenmail():
             f"-Dgreenmail.users={USER.split('@')[0]}:{PASSWORD}@example.com "
             "-Dgreenmail.users.login=email -Dgreenmail.verbose",
         )
-        .with_exposed_ports(3993)
+        .with_exposed_ports(3993, 3465)
     )
     c.start()
     wait_for_logs(c, "Starting GreenMail standalone", timeout=60)
     time.sleep(1)
-    yield c.get_container_host_ip(), int(c.get_exposed_port(3993))
+    yield c
     c.stop()
+
+
+@pytest.fixture(scope="session")
+def greenmail(greenmail_container):
+    """(host, port) of GreenMail's IMAPS server."""
+    c = greenmail_container
+    return c.get_container_host_ip(), int(c.get_exposed_port(3993))
+
+
+@pytest.fixture(scope="session")
+def greenmail_smtps(greenmail_container):
+    """(host, port) of GreenMail's SMTPS server (implicit TLS, self-signed)."""
+    c = greenmail_container
+    return c.get_container_host_ip(), int(c.get_exposed_port(3465))
 
 
 @pytest.fixture

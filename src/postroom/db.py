@@ -3,7 +3,7 @@ import os
 import sqlite3
 import threading
 
-SCHEMA_VERSION = 2
+SCHEMA_VERSION = 3
 
 MIGRATIONS: dict[int, str] = {
     1: """
@@ -69,6 +69,13 @@ MIGRATIONS: dict[int, str] = {
     CREATE TABLE oauth_used_codes (
         code_hash TEXT PRIMARY KEY, family_id TEXT NOT NULL, expires_at INTEGER NOT NULL
     );
+    """,
+    3: """
+    -- Per-account mail access level: read (read + drafts), organize (+ flags, move, trash,
+    -- create folders), full (+ sending). Existing accounts get 'full': MCP clients ask the
+    -- user to approve every non-read-only tool call; the owner can lower it per account.
+    ALTER TABLE accounts ADD COLUMN mail_access TEXT NOT NULL DEFAULT 'full'
+        CHECK (mail_access IN ('read','organize','full'));
     """,
 }
 

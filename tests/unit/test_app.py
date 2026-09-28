@@ -12,6 +12,8 @@ READ_TOOLS = {
     "get_thread",
     "get_attachment",
 }
+ORGANIZE_TOOLS = {"mark_emails", "move_emails", "trash_emails", "create_folder"}
+
 PIM_TOOLS = {
     "list_calendars",
     "list_events",
@@ -45,12 +47,19 @@ async def test_build_mcp_registers_annotated_mail_tools(settings):
     assert mcp.name == "postroom" and mcp.instructions == SERVER_INSTRUCTIONS
     async with Client(mcp) as c:
         tools = {t.name: t for t in await c.list_tools()}
-    assert set(tools) == READ_TOOLS | {"create_draft"} | PIM_TOOLS
+    assert set(tools) == READ_TOOLS | {"create_draft"} | ORGANIZE_TOOLS | PIM_TOOLS
     for name in READ_TOOLS:
         assert tools[name].annotations.read_only_hint is True
         assert tools[name].annotations.open_world_hint is True
     assert tools["create_draft"].annotations.read_only_hint is False
     assert tools["create_draft"].annotations.destructive_hint is False
+    for name in ORGANIZE_TOOLS:
+        assert tools[name].annotations.read_only_hint is False
+    assert tools["mark_emails"].annotations.destructive_hint is False
+    assert tools["mark_emails"].annotations.idempotent_hint is True
+    assert tools["move_emails"].annotations.destructive_hint is True
+    assert tools["trash_emails"].annotations.destructive_hint is True
+    assert tools["create_folder"].annotations.destructive_hint is False
 
 
 async def test_unknown_account_is_clean_tool_error(settings):

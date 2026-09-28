@@ -1,19 +1,27 @@
-"""MailService: async orchestration over `ImapPool` for search/read/thread/attachment/draft.
+"""MailService: async orchestration over `ImapPool` for search/read/thread/attachment/draft
+and for organising mail (flags, move, trash, new folders).
 
 Every synchronous IMAP interaction runs inside `asyncio.to_thread(...)` under a
-per-call timeout, opens folders read-only (`select_folder(name, readonly=True)`), and
-fetches bodies only via `BODY.PEEK[...]`. The only IMAP write anywhere here is
-`append(...)` to the Drafts folder with the `\\Draft` flag -- this module is read-only
-mail otherwise, per the project's fail2ban-safety and read-only-mail constraints.
+per-call timeout. Reads open folders read-only (`select_folder(name, readonly=True)`,
+i.e. EXAMINE) and fetch bodies only via `BODY.PEEK[...]`, so reading never marks mail
+read. The writes are: `append(...)` of a draft to the Drafts folder, and -- only on
+accounts whose mail access level is at least "organize" -- STORE of `\\Seen` /
+`\\Flagged`, UID MOVE (or COPY + STORE `\\Deleted` + UID EXPUNGE of exactly those
+UIDs), and CREATE of a folder. Those select their folder read-write. Nothing here ever
+deletes mail permanently or sends it; a plain EXPUNGE is never issued.
 """
 
 import asyncio
-from contextlib import nullcontext
+import threading
+from collections.abc import Callable, Sequence
+from contextlib import contextmanager, nullcontext
+from dataclasses import dataclass, field
 from datetime import UTC, datetime
 
 import imapclient
+from imapclient.exceptions import IMAPClientAbortError, IMAPClientError
 
-from postroom.accounts import Account, AccountRepo, AccountStatus
+from postroom.accounts import Account, AccountRepo, AccountStatus, MailAccess
 from postroom.mail.folders import FolderNotFound, resolve_folder, special_use_of
 from postroom.mail.heavy import heavy_work
 from postroom.mail.imap import (
@@ -27,10 +35,13 @@ from postroom.mail.imap import (
 from postroom.mail.models import (
     AccountError,
     AttachmentInfo,
+    BatchResult,
     DraftResult,
     FolderInfo,
     MessageDetail,
+    MessageRef,
     MessageSummary,
+    RefGroup,
     SearchCriteria,
     SearchResult,
 )
@@ -74,6 +85,17 @@ BODY_NOT_LOADED = "\n\n[… the rest of this email's text was not loaded: the em
 # chunks and keep only the small `MessageSummary` objects.
 MAX_SEARCH_OFFSET = 1000
 FETCH_CHUNK = 200
+
+# Organising: one call may change at most this many emails (across all accounts).
+MAX_BATCH_REFS = 500
+MAX_FOLDER_NAME = 200
+MESSAGE_NOT_FOUND = "message not found"
+MOVE_UNSUPPORTED = "this server cannot move messages safely (it supports neither MOVE nor UIDPLUS)"
+# An account that timed out may have had some of its emails changed already.
+PARTIAL_TIMEOUT = (
+    "the mail server did not respond in time; the change may have been partially applied; "
+    "re-check with search_emails before retrying"
+)
 
 _BLOCKED_STATUSES = (AccountStatus.NEEDS_RECONNECT, AccountStatus.NEEDS_GOOGLE_CONNECT)
 _NOSELECT = (b"\\Noselect", b"\\NonExistent")
@@ -223,6 +245,200 @@ def _summary_from_fetch(account_email: str, folder: str, uid: int, data: dict) -
         has_attachments=bodystructure_has_attachment(data.get(b"BODYSTRUCTURE")),
         thread_id=str(thrid) if thrid is not None else None,
     )
+
+
+# -- organising helpers ------------------------------------------------------------------
+
+
+def _group_refs(refs: list[MessageRef]) -> dict[str, dict[str, list[int]]]:
+    """account -> folder (as given) -> UIDs, in first-seen order and without duplicates."""
+    if not refs:
+        raise ValueError("no emails given")
+    if len(refs) > MAX_BATCH_REFS:
+        raise ValueError(
+            f"at most {MAX_BATCH_REFS} emails can be changed in one call ({len(refs)} given); "
+            "split the list into smaller batches"
+        )
+    grouped: dict[str, dict[str, dict[int, None]]] = {}
+    for ref in refs:
+        uid = ref.uid
+        if isinstance(uid, bool) or not isinstance(uid, int) or uid < 1:
+            raise ValueError(f"invalid uid: {uid!r}")
+        email = ref.account.strip().lower()
+        grouped.setdefault(email, {}).setdefault(ref.folder, {})[uid] = None
+    return {
+        email: {folder: list(uids) for folder, uids in folders.items()}
+        for email, folders in grouped.items()
+    }
+
+
+class _AccountBatch:
+    """One account's share of a batch change, and what has happened to it so far.
+
+    The IMAP thread records each folder's outcome as soon as it is done. When the account
+    then fails (connection lost, timeout) the folders still pending fail with that error;
+    after `close()` late outcomes from a thread the caller gave up on are ignored.
+    """
+
+    def __init__(self, email: str, groups: dict[str, list[int]]):
+        self.email = email
+        self._pending = dict(groups)
+        self._result = BatchResult()
+        self._lock = threading.Lock()
+        self._closed = False
+
+    def pending(self) -> dict[str, list[int]]:
+        with self._lock:
+            return dict(self._pending)
+
+    def record(
+        self,
+        keys: list[str],
+        *,
+        updated: int = 0,
+        skipped: Sequence[RefGroup] = (),
+        failed: Sequence[RefGroup] = (),
+    ) -> None:
+        with self._lock:
+            if self._closed:
+                return
+            for key in keys:
+                self._pending.pop(key, None)
+            self._result.updated += updated
+            self._result.skipped.extend(skipped)
+            self._result.failed.extend(failed)
+
+    def set_destination(self, folder: str) -> None:
+        with self._lock:
+            if not self._closed:
+                self._result.destinations[self.email] = folder
+
+    def close(self, error: str | None) -> BatchResult:
+        with self._lock:
+            self._closed = True
+            if error is not None:
+                for folder, uids in self._pending.items():
+                    self._result.failed.append(RefGroup(self.email, folder, uids, error))
+            self._pending = {}
+            return self._result
+
+
+@dataclass
+class _FolderOutcome:
+    updated: int = 0
+    skipped: list[int] = field(default_factory=list)
+    missing: list[int] = field(default_factory=list)
+
+
+# (client, resolved folder name, UIDs in it) -> what happened to them
+FolderHandler = Callable[[object, str, list[int]], _FolderOutcome]
+
+
+@contextmanager
+def _folder_errors(batch: _AccountBatch, keys: list[str], name: str, uids: list[int]):
+    """Record a server's refusal for one folder and carry on with the next one.
+
+    Errors that break the connection propagate: the pool drops the connection, and the
+    account's remaining folders fail with that error.
+    """
+    try:
+        yield
+    except IMAPClientAbortError:
+        raise
+    except (IMAPClientError, ImapError, FolderNotFound, ValueError) as e:
+        batch.record(keys, failed=[RefGroup(batch.email, name, uids, str(e) or type(e).__name__)])
+
+
+def _each_folder(
+    c, folders, batch: _AccountBatch, handle: FolderHandler, skip_reason: str = ""
+) -> None:
+    """Resolve the batch's folders (merging names that resolve to the same folder) and
+    hand each folder's UIDs to `handle`, recording the outcome folder by folder."""
+    merged: dict[str, tuple[list[str], dict[int, None]]] = {}
+    for key, uids in batch.pending().items():
+        try:
+            name = resolve_folder(folders, key)
+        except FolderNotFound as e:
+            batch.record([key], failed=[RefGroup(batch.email, key, uids, str(e))])
+            continue
+        keys, merged_uids = merged.setdefault(name, ([], {}))
+        keys.append(key)
+        merged_uids.update(dict.fromkeys(uids))
+
+    for name, (keys, uid_set) in merged.items():
+        uids = list(uid_set)
+        with _folder_errors(batch, keys, name, uids):
+            out = handle(c, name, uids)
+            skipped = [RefGroup(batch.email, name, out.skipped, skip_reason)] if out.skipped else []
+            failed = (
+                [RefGroup(batch.email, name, out.missing, MESSAGE_NOT_FOUND)] if out.missing else []
+            )
+            batch.record(keys, updated=out.updated, skipped=skipped, failed=failed)
+
+
+def _existing(c, uids: list[int]) -> tuple[list[int], list[int]]:
+    """The UIDs that exist in the selected folder, and those that do not."""
+    fetched = c.fetch(uids, ["FLAGS"])
+    present = [u for u in uids if u in fetched]
+    missing = [u for u in uids if u not in fetched]
+    return present, missing
+
+
+def _move_uids(c, uids: list[int], dest: str) -> None:
+    """Move UIDs of the selected folder to `dest`.
+
+    UID MOVE (RFC 6851) when the server has it. Otherwise, with UIDPLUS (RFC 4315): COPY,
+    mark the originals \\Deleted, then UID EXPUNGE exactly those UIDs. A plain EXPUNGE
+    would also purge every other message someone had marked \\Deleted, so without
+    either extension the move is refused.
+    """
+    if c.has_capability("MOVE"):
+        c.move(uids, dest)
+    elif c.has_capability("UIDPLUS"):
+        c.copy(uids, dest)
+        try:
+            c.add_flags(uids, [imapclient.DELETED], silent=True)
+            c.uid_expunge(uids)
+        except IMAPClientAbortError:
+            raise
+        except IMAPClientError as e:
+            raise ImapError(
+                f"copied to {dest!r}, but the originals could not be removed: {e}"
+            ) from e
+    else:
+        raise ImapError(MOVE_UNSUPPORTED)
+
+
+def _destination(account: Account, folders, wanted: str) -> str:
+    """The folder `wanted` names on this account, SPECIAL-USE first.
+
+    Gmail has no \\Archive folder: archiving there means leaving the Inbox, which a move
+    to All Mail (\\All) does, so the "archive" alias maps to it.
+    """
+    if account.is_gmail and wanted.strip().lower() == "archive":
+        has_archive = any(
+            special_use_of(flags) == "archive" and not any(f in _NOSELECT for f in flags)
+            for flags, _delim, _name in folders
+        )
+        if not has_archive:
+            wanted = "all"
+    return resolve_folder(folders, wanted, special_use_first=True)
+
+
+def _parent_folder(folders, parent: str) -> tuple[str, str | None]:
+    """A parent folder's name and hierarchy delimiter. A parent may be a container that
+    cannot hold mail itself (\\Noselect, e.g. Gmail's "[Gmail]")."""
+    try:
+        name = resolve_folder(folders, parent)
+    except FolderNotFound:
+        matches = [n for _f, _d, n in folders if n == parent] or [
+            n for _f, _d, n in folders if n.lower() == parent.lower()
+        ]
+        if not matches:
+            raise
+        name = matches[0]
+    delim = next(d for _f, d, n in folders if n == name)
+    return name, delim.decode() if isinstance(delim, bytes) else delim
 
 
 class MailService:
@@ -637,5 +853,147 @@ class MailService:
                 drafts_name = resolve_folder(folders, "drafts", special_use_first=True)
                 c.append(drafts_name, raw, flags=(imapclient.DRAFT,), msg_time=datetime.now(UTC))
                 return DraftResult(account=account.email, folder=drafts_name, message_id=msgid)
+
+        return await self._run(work)
+
+    # -- organise ---------------------------------------------------------------
+
+    async def _batch(
+        self,
+        refs: list[MessageRef],
+        level: MailAccess,
+        work: Callable[[Account, _AccountBatch], None],
+    ) -> BatchResult:
+        """Run `work` for each account's share of `refs`: accounts in parallel, folders
+        within an account one after another. Account-level failures (unknown account,
+        access level too low, login, timeout) fail that account's pending emails."""
+        grouped = _group_refs(refs)
+        sem = asyncio.Semaphore(self.max_concurrency)
+
+        async def run_one(email: str, groups: dict[str, list[int]]) -> BatchResult:
+            batch = _AccountBatch(email, groups)
+            error = None
+            try:
+                account = self._require_account(email)
+                account.require_mail_access(level)
+                async with sem:
+                    await self._run(lambda: work(account, batch))
+            except TimeoutError:
+                error = PARTIAL_TIMEOUT
+            except Exception as e:  # noqa: BLE001 -- reported per account, like search
+                error = str(e) or type(e).__name__
+            return batch.close(error)
+
+        results = await asyncio.gather(*(run_one(e, g) for e, g in grouped.items()))
+        total = BatchResult()
+        for res in results:
+            total.updated += res.updated
+            total.skipped.extend(res.skipped)
+            total.failed.extend(res.failed)
+            total.destinations.update(res.destinations)
+        return total
+
+    async def set_flags(
+        self, refs: list[MessageRef], *, read: bool | None = None, flagged: bool | None = None
+    ) -> BatchResult:
+        """Mark emails read / unread (\\Seen) and flagged / unflagged (\\Flagged)."""
+        if read is None and flagged is None:
+            raise ValueError("set read, flagged or both")
+        changes = [
+            (flag, on)
+            for flag, on in ((imapclient.SEEN, read), (imapclient.FLAGGED, flagged))
+            if on is not None
+        ]
+
+        def handle(c, name: str, uids: list[int]) -> _FolderOutcome:
+            c.select_folder(name, readonly=False)
+            present, missing = _existing(c, uids)
+            if present:
+                for flag, on in changes:
+                    store = c.add_flags if on else c.remove_flags
+                    store(present, [flag], silent=True)
+            return _FolderOutcome(updated=len(present), missing=missing)
+
+        def work(account: Account, batch: _AccountBatch) -> None:
+            with self.pool.session(account.email) as c:
+                _each_folder(c, c.list_folders(), batch, handle)
+
+        return await self._batch(refs, MailAccess.ORGANIZE, work)
+
+    async def move(
+        self, refs: list[MessageRef], to_folder: str, *, skip_reason: str | None = None
+    ) -> BatchResult:
+        """Move emails to `to_folder` (a folder name or alias, resolved per account).
+        Emails already in it are left there and reported as skipped."""
+        if not to_folder or not to_folder.strip():
+            raise ValueError("to_folder must not be empty")
+
+        def work(account: Account, batch: _AccountBatch) -> None:
+            with self.pool.session(account.email) as c:
+                folders = c.list_folders()
+                dest = _destination(account, folders, to_folder)
+                batch.set_destination(dest)
+
+                def handle(c, name: str, uids: list[int]) -> _FolderOutcome:
+                    if name == dest:
+                        c.select_folder(name, readonly=True)
+                        present, missing = _existing(c, uids)
+                        return _FolderOutcome(skipped=present, missing=missing)
+                    c.select_folder(name, readonly=False)
+                    present, missing = _existing(c, uids)
+                    if present:
+                        _move_uids(c, present, dest)
+                    return _FolderOutcome(updated=len(present), missing=missing)
+
+                _each_folder(c, folders, batch, handle, skip_reason or f"already in {dest}")
+
+        return await self._batch(refs, MailAccess.ORGANIZE, work)
+
+    async def trash(self, refs: list[MessageRef]) -> BatchResult:
+        """Move emails to each account's Trash. Emails already there are left alone:
+        nothing is ever deleted permanently."""
+        return await self.move(refs, "trash", skip_reason="already in trash")
+
+    async def create_folder(self, email: str, name: str, parent: str | None = None) -> str:
+        """Create a folder (under `parent`, when given); returns its full name."""
+        name = (name or "").strip()
+        if not name:
+            raise ValueError("folder name must not be empty")
+        if len(name) > MAX_FOLDER_NAME:
+            raise ValueError(f"folder name must be at most {MAX_FOLDER_NAME} characters")
+        if not is_safe_imap_value(name):
+            raise ValueError("line breaks and NUL characters are not allowed in folder names")
+        account = self._require_account(email)
+        account.require_mail_access(MailAccess.ORGANIZE)
+
+        def work() -> str:
+            with self.pool.session(account.email) as c:
+                folders = c.list_folders()
+                if parent:
+                    parent_name, delim = _parent_folder(folders, parent)
+                    if not delim:
+                        raise ValueError(
+                            "this server has no folder hierarchy; create the folder without "
+                            "a parent"
+                        )
+                    full = f"{parent_name}{delim}{name}"
+                else:
+                    full = name
+                if any(n.lower() == full.lower() for _f, _d, n in folders):
+                    raise ValueError(f"folder already exists: {full!r}")
+                try:
+                    c.create_folder(full)
+                except IMAPClientAbortError:
+                    raise
+                except IMAPClientError as e:
+                    raise ImapError(f"the server refused to create the folder: {e}") from e
+                # Many mail apps only show subscribed folders.
+                try:
+                    c.subscribe_folder(full)
+                except IMAPClientAbortError:
+                    raise
+                except IMAPClientError:
+                    pass
+                return full
 
         return await self._run(work)

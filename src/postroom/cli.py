@@ -7,7 +7,7 @@ import os
 import sys
 from datetime import UTC, datetime
 
-from postroom.accounts import AccountRepo
+from postroom.accounts import AccountRepo, MailAccess
 from postroom.config import Settings
 from postroom.crypto import SecretBox, generate_key, hash_password, new_token, random_password
 from postroom.db import Database
@@ -72,12 +72,22 @@ def _cmd_import_emclient(args: argparse.Namespace) -> int:
 
 def _cmd_list_accounts(args: argparse.Namespace) -> int:
     _, _, _, repo = _services_minimal()
-    print("email\tprovider\tstatus\tenabled\tlast_error")
+    print("email\tprovider\tstatus\tenabled\tmail_access\tlast_error")
     for acc in repo.list():
         print(
             f"{acc.email}\t{acc.provider.value}\t{acc.status.value}\t"
-            f"{acc.enabled}\t{acc.last_error or ''}"
+            f"{acc.enabled}\t{acc.mail_access.value}\t{acc.last_error or ''}"
         )
+    return 0
+
+
+def _cmd_set_access(args: argparse.Namespace) -> int:
+    _, _, _, repo = _services_minimal()
+    email = args.email.strip().lower()
+    if not repo.set_mail_access(email, MailAccess(args.level)):
+        print(f"unknown account: {email}", file=sys.stderr)
+        return 1
+    print(f"{email}\t{args.level}")
     return 0
 
 
@@ -239,6 +249,19 @@ def main(argv: list[str] | None = None) -> int:
 
     p_list = sub.add_parser("list-accounts", help="List configured accounts")
     p_list.set_defaults(func=_cmd_list_accounts)
+
+    p_access = sub.add_parser(
+        "set-access",
+        help="Set what the MCP tools may do with an account's mail",
+        description=(
+            "Set an account's mail access level: read (search, read, create drafts), "
+            "organize (also mark read/flagged, move, trash, create folders) or full "
+            "(also send). New and existing accounts default to full."
+        ),
+    )
+    p_access.add_argument("email", help="The account's email address")
+    p_access.add_argument("level", choices=[m.value for m in MailAccess])
+    p_access.set_defaults(func=_cmd_set_access)
 
     p_gen = sub.add_parser(
         "gen-secrets", help="Generate master key, session secret and admin password"

@@ -1,7 +1,10 @@
-"""MCP mail tools: accounts, folders, search, read, thread, attachment, draft.
+"""MCP mail tools: accounts, folders, search, read, thread, attachment, draft, and
+organising (mark read / flagged, move, trash, create folder).
 
-Every tool is read-only except `create_draft`, which only saves a draft in the Drafts
-folder. There is deliberately no tool that sends, deletes, moves or flags mail.
+The read tools never change anything (an email is not even marked read). `create_draft`
+only saves a draft in the Drafts folder; nothing is ever sent. The organising tools work
+only on accounts whose mail access level is "organize" or "full" (set by the owner per
+account); trash moves to the Trash folder, and nothing is ever deleted permanently.
 
 Errors the model can act on (unknown account, missing folder or message, bad argument,
 unreachable server) are raised as `ToolError` carrying only the exception's message.
@@ -18,19 +21,23 @@ from datetime import date
 from fastmcp import FastMCP
 from fastmcp.exceptions import ToolError
 from fastmcp.utilities.types import Image
+from pydantic import BaseModel, ConfigDict, Field
 
-from postroom.accounts import AccountRepo
+from postroom.accounts import AccountRepo, MailAccessDenied
 from postroom.google.oauth import GoogleOAuthError
 from postroom.mail.folders import FolderNotFound
 from postroom.mail.heavy import ServerBusy, heavy_work
 from postroom.mail.imap import ImapError
-from postroom.mail.models import AttachmentInfo, SearchCriteria
+from postroom.mail.models import AttachmentInfo, MessageRef, SearchCriteria
 from postroom.mail.parse import truncate
 from postroom.mail.pdf import PdfTooComplex, extract_text_isolated
-from postroom.mail.service import MAX_SEARCH_OFFSET, MailService
+from postroom.mail.service import MAX_SEARCH_OFFSET, PARTIAL_TIMEOUT, MailService
 
 READ_ONLY = {"readOnlyHint": True, "openWorldHint": True}
 WRITES_DRAFT = {"readOnlyHint": False, "destructiveHint": False}
+MODIFIES = {"readOnlyHint": False, "destructiveHint": False, "idempotentHint": True}
+MOVES = {"readOnlyHint": False, "destructiveHint": True}
+CREATES = {"readOnlyHint": False, "destructiveHint": False, "idempotentHint": False}
 
 MAX_ATTACHMENT_BYTES = 10 * 1024 * 1024  # spec §4 size cap: bigger → metadata only
 MAX_IMAGE_BYTES = 5 * 1024 * 1024
@@ -50,6 +57,7 @@ _CLIENT_ERRORS = (
     ValueError,
     GoogleOAuthError,
     ServerBusy,
+    MailAccessDenied,
 )
 _ISO_DATE = re.compile(r"\d{4}-\d{2}-\d{2}")
 
@@ -67,6 +75,27 @@ DRAFT_TIMEOUT_MESSAGE = (
     "the mail server did not respond in time; the draft may or may not have been saved; "
     "check the Drafts folder before trying again"
 )
+
+# A batch change that timed out may have been applied to some of the emails.
+ORGANIZE_TIMEOUT_MESSAGE = PARTIAL_TIMEOUT
+CREATE_FOLDER_TIMEOUT_MESSAGE = (
+    "the mail server did not respond in time; the folder may or may not have been created; "
+    "check list_folders before trying again"
+)
+
+
+class EmailRef(BaseModel):
+    """One email, as search_emails / get_thread return it (other fields are ignored)."""
+
+    model_config = ConfigDict(extra="ignore")
+
+    account: str = Field(description="The account's email address.")
+    folder: str = Field(description="The folder the email is in, as returned by search_emails.")
+    uid: int = Field(ge=1, description="The email's uid in that folder.")
+
+
+def _refs(emails: list[EmailRef]) -> list[MessageRef]:
+    return [MessageRef(_norm(e.account), e.folder, e.uid) for e in emails]
 
 
 @contextmanager
@@ -181,6 +210,9 @@ def register_mail_tools(mcp: FastMCP, repo: AccountRepo, mail: MailService) -> N
         Use an account's `email` as the `account` argument of the other tools. `status`
         other than "connected" (e.g. "needs_reconnect") means the account can't be read
         until the owner fixes it in the admin UI; disabled accounts are never searched.
+        `mail_access` is what the owner allows on the account's mail: "read" (read and
+        create drafts), "organize" (also mark, move, trash, create folders) or "full"
+        (also send). `capabilities` lists "mail.organize" / "mail.send" accordingly.
         """
         return [
             {
@@ -190,6 +222,7 @@ def register_mail_tools(mcp: FastMCP, repo: AccountRepo, mail: MailService) -> N
                 "status": a.status.value,
                 "enabled": a.enabled,
                 "capabilities": a.capabilities,
+                "mail_access": a.mail_access.value,
                 "last_error": a.last_error,
             }
             for a in repo.list()
@@ -333,3 +366,69 @@ def register_mail_tools(mcp: FastMCP, repo: AccountRepo, mail: MailService) -> N
                 reply_uid=reply_to_uid,
             )
         return result.to_dict()
+
+    @mcp.tool(annotations=MODIFIES)
+    async def mark_emails(
+        emails: list[EmailRef], read: bool | None = None, flagged: bool | None = None
+    ) -> dict:
+        """Mark emails read or unread, and/or flag (star) or unflag them.
+
+        emails: one or more {account, folder, uid}; search_emails results can be passed
+        straight through, across accounts and folders (at most 500 per call).
+        read: true = mark read, false = mark unread; flagged: true = star, false = unstar.
+        Give at least one of them.
+
+        Returns {"updated": n, "skipped": [], "failed": [{account, folder, uids, error}]}.
+        Needs mail access "organize" or "full" on each account.
+        """
+        with _tool_errors(ORGANIZE_TIMEOUT_MESSAGE):
+            result = await mail.set_flags(_refs(emails), read=read, flagged=flagged)
+        return result.to_dict()
+
+    @mcp.tool(annotations=MOVES)
+    async def move_emails(emails: list[EmailRef], to_folder: str) -> dict:
+        """Move emails to another folder of the same account.
+
+        emails: one or more {account, folder, uid}; search_emails results can be passed
+        straight through, across accounts and folders (at most 500 per call).
+        to_folder: a folder name, or an alias resolved per account: inbox, archive, junk,
+        trash, all. "archive" archives the email (on Gmail it moves it to All Mail, i.e.
+        removes it from the Inbox). Emails already in to_folder are reported as skipped.
+
+        Returns {"updated": n, "skipped": [{account, folder, uids, reason}],
+        "failed": [{account, folder, uids, error}], "moved_to": {account: folder}}.
+        After a move the emails have new uids; search again to act on them.
+        Needs mail access "organize" or "full" on each account.
+        """
+        with _tool_errors(ORGANIZE_TIMEOUT_MESSAGE):
+            result = await mail.move(_refs(emails), to_folder)
+        return result.to_dict()
+
+    @mcp.tool(annotations=MOVES)
+    async def trash_emails(emails: list[EmailRef]) -> dict:
+        """Move emails to their account's Trash folder. Nothing is deleted permanently;
+        emails already in Trash are left there (reported as skipped).
+
+        emails: one or more {account, folder, uid}; search_emails results can be passed
+        straight through, across accounts and folders (at most 500 per call).
+
+        Returns {"updated": n, "skipped": [...], "failed": [...], "moved_to": {...}} like
+        move_emails. Needs mail access "organize" or "full" on each account.
+        """
+        with _tool_errors(ORGANIZE_TIMEOUT_MESSAGE):
+            result = await mail.trash(_refs(emails))
+        return result.to_dict()
+
+    @mcp.tool(annotations=CREATES)
+    async def create_folder(account: str, name: str, parent: str | None = None) -> dict:
+        """Create a new folder in an account.
+
+        name: the new folder's name (at most 200 characters). parent: an existing folder
+        (name or alias) to create it in; omit for a top-level folder. Fails if the folder
+        already exists. Needs mail access "organize" or "full".
+        Returns {"account", "folder"}: the new folder's full name, usable as a folder
+        argument of the other tools.
+        """
+        with _tool_errors(CREATE_FOLDER_TIMEOUT_MESSAGE):
+            folder = await mail.create_folder(_norm(account), name, parent)
+        return {"account": _norm(account), "folder": folder}

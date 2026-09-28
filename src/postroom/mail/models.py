@@ -154,3 +154,47 @@ class DraftResult:
 
     def to_dict(self) -> dict:
         return _json_safe(dataclasses.asdict(self))
+
+
+@dataclasses.dataclass(frozen=True)
+class MessageRef:
+    """One email, as search_emails returns it: account, folder (name or alias) and UID."""
+
+    account: str
+    folder: str
+    uid: int
+
+
+@dataclasses.dataclass
+class RefGroup:
+    """Emails of one account and folder that share an outcome (why skipped / failed)."""
+
+    account: str
+    folder: str
+    uids: list[int]
+    message: str
+
+
+@dataclasses.dataclass
+class BatchResult:
+    """Outcome of one change over many emails: how many were changed, which were left as
+    they were and why, and which failed and why (grouped per account, folder and reason)."""
+
+    updated: int = 0
+    skipped: list[RefGroup] = dataclasses.field(default_factory=list)
+    failed: list[RefGroup] = dataclasses.field(default_factory=list)
+    # account -> the folder its emails were moved to (move / trash only)
+    destinations: dict[str, str] = dataclasses.field(default_factory=dict)
+
+    def to_dict(self) -> dict:
+        def group(g: RefGroup, key: str) -> dict:
+            return {"account": g.account, "folder": g.folder, "uids": g.uids, key: g.message}
+
+        d: dict = {
+            "updated": self.updated,
+            "skipped": [group(g, "reason") for g in self.skipped],
+            "failed": [group(g, "error") for g in self.failed],
+        }
+        if self.destinations:
+            d["moved_to"] = dict(self.destinations)
+        return _json_safe(d)

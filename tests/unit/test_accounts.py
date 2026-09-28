@@ -92,7 +92,14 @@ def test_capabilities(repo):
         imap_port=993,
         imap_security="ssl",
     )
-    assert g.is_gmail and g.capabilities == ["mail", "calendar", "tasks", "contacts"]
+    assert g.is_gmail and g.capabilities == [
+        "mail",
+        "mail.organize",
+        "mail.send",
+        "calendar",
+        "tasks",
+        "contacts",
+    ]
     s = repo.upsert(
         email="s@x.cz",
         provider=Provider.IMAP,
@@ -102,7 +109,14 @@ def test_capabilities(repo):
         caldav_url="https://h/SOGo/dav/s@x.cz/",
         carddav_url="https://h/SOGo/dav/s@x.cz/",
     )
-    assert s.capabilities == ["mail", "calendar", "tasks", "contacts"]
+    assert s.capabilities == [
+        "mail",
+        "mail.organize",
+        "mail.send",
+        "calendar",
+        "tasks",
+        "contacts",
+    ]
     f = repo.upsert(
         email="f@y.cz",
         provider=Provider.IMAP,
@@ -110,7 +124,7 @@ def test_capabilities(repo):
         imap_port=143,
         imap_security="starttls",
     )
-    assert f.capabilities == ["mail"] and not f.is_gmail
+    assert f.capabilities == ["mail", "mail.organize", "mail.send"] and not f.is_gmail
 
 
 def test_mark_connected_is_conditional_on_the_expected_status(repo):

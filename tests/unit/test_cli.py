@@ -3,6 +3,8 @@ import io
 import os
 import stat
 
+import pytest
+
 from postroom import cli
 from postroom.crypto import verify_password
 from tests.unit.test_emclient import PASS, XML
@@ -150,3 +152,33 @@ def test_api_key_cli_edge_cases(monkeypatch, settings, capsys):
     assert cli.main(["list-api-keys"]) == 0
     fields = capsys.readouterr().out.strip().split("\t")
     assert fields[1:3] == ["laptop", key[:8]] and fields[4] == "-" and fields[5] == "active"
+
+
+def test_set_access(monkeypatch, settings, capsys):
+    _env(monkeypatch, settings)
+    from postroom.accounts import AccountRepo, MailAccess, Provider
+    from postroom.crypto import SecretBox
+    from postroom.db import Database
+
+    repo = AccountRepo(Database(settings.db_path), SecretBox(settings.master_key))
+    repo.upsert(email="user@example.com", provider=Provider.IMAP)
+    assert repo.get("user@example.com").mail_access == MailAccess.FULL
+
+    assert cli.main(["set-access", "User@Example.com", "read"]) == 0
+    assert capsys.readouterr().out == "user@example.com\tread\n"
+    assert repo.get("user@example.com").mail_access == MailAccess.READ
+
+    assert cli.main(["list-accounts"]) == 0
+    lines = capsys.readouterr().out.splitlines()
+    assert lines[0].split("\t")[4] == "mail_access" and lines[1].split("\t")[4] == "read"
+
+    assert cli.main(["set-access", "user@example.com", "organize"]) == 0
+    assert repo.get("user@example.com").mail_access == MailAccess.ORGANIZE
+
+    assert cli.main(["set-access", "nobody@example.com", "full"]) == 1
+    assert "unknown account: nobody@example.com" in capsys.readouterr().err
+
+    with pytest.raises(SystemExit) as e:
+        cli.main(["set-access", "user@example.com", "admin"])
+    assert e.value.code == 2
+    assert repo.get("user@example.com").mail_access == MailAccess.ORGANIZE

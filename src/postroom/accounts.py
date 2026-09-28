@@ -19,6 +19,40 @@ class AccountStatus(StrEnum):
     NEEDS_GOOGLE_CONNECT = "needs_google_connect"
 
 
+class MailAccess(StrEnum):
+    """What the MCP tools may do with an account's mail. Each level includes the ones before.
+
+    read: search, read and create drafts. organize: also change flags, move, trash and
+    create folders. full: also send mail.
+    """
+
+    READ = "read"
+    ORGANIZE = "organize"
+    FULL = "full"
+
+    @property
+    def rank(self) -> int:
+        return list(MailAccess).index(self)
+
+
+# How an access level is named in an error message.
+_ACCESS_LABEL = {
+    MailAccess.READ: "read-only",
+    MailAccess.ORGANIZE: "organize-only (no sending)",
+    MailAccess.FULL: "full",
+}
+
+
+class MailAccessDenied(Exception):
+    """A mail operation needs a higher access level than the account allows."""
+
+    def __init__(self, email: str, level: MailAccess):
+        super().__init__(
+            f"account {email} is set to {_ACCESS_LABEL[level]} mail access; "
+            "the owner can change this in the admin UI"
+        )
+
+
 @dataclass(frozen=True)
 class Account:
     id: int
@@ -37,6 +71,7 @@ class Account:
     last_error: str | None
     last_ok_at: int | None
     last_check_at: int | None
+    mail_access: MailAccess = MailAccess.FULL
 
     @property
     def is_gmail(self) -> bool:
@@ -44,9 +79,30 @@ class Account:
             self.provider == Provider.GOOGLE or (self.imap_host or "").lower() == "imap.gmail.com"
         )
 
+    def allows(self, level: MailAccess) -> bool:
+        return self.mail_access.rank >= level.rank
+
+    def require_mail_access(self, level: MailAccess) -> None:
+        """Raise `MailAccessDenied` unless the account's mail access is at least `level`."""
+        if not self.allows(level):
+            raise MailAccessDenied(self.email, self.mail_access)
+
+    @property
+    def can_send(self) -> bool:
+        """Whether this account may send mail: the one place that decides it.
+
+        For now only the access level counts; once sending exists it must also require
+        the account's outgoing (SMTP) server to be configured.
+        """
+        return self.mail_access == MailAccess.FULL
+
     @property
     def capabilities(self) -> list[str]:
         caps = ["mail"]
+        if self.allows(MailAccess.ORGANIZE):
+            caps.append("mail.organize")
+        if self.can_send:
+            caps.append("mail.send")
         if self.provider == Provider.GOOGLE or self.caldav_url:
             caps.append("calendar")
             caps.append("tasks")
@@ -77,6 +133,7 @@ def _row_to_account(row) -> Account:
         last_error=row["last_error"],
         last_ok_at=row["last_ok_at"],
         last_check_at=row["last_check_at"],
+        mail_access=MailAccess(row["mail_access"]),
     )
 
 
@@ -114,6 +171,7 @@ class AccountRepo:
         carddav_url: str | None = None,
         secret: str | None = None,
         status: AccountStatus | None = None,
+        mail_access: MailAccess | None = None,
     ) -> Account:
         email = email.strip().lower()
         now = int(time.time())
@@ -136,6 +194,8 @@ class AccountRepo:
             columns["secret_enc"] = self._box.encrypt(secret, f"account:{email}")
         if status is not None:
             columns["status"] = status.value
+        if mail_access is not None:
+            columns["mail_access"] = MailAccess(mail_access).value
 
         insert_cols = ["email", "enabled", "created_at", "updated_at", *columns.keys()]
         insert_vals = [email, 1, now, now, *columns.values()]
@@ -204,6 +264,18 @@ class AccountRepo:
                     email.strip().lower(),
                     expected.value,
                 ),
+            )
+        )
+
+    def set_mail_access(self, email: str, level: MailAccess | str) -> bool:
+        """Set the account's mail access level. False when there is no such account.
+
+        Raises ValueError for an unknown level."""
+        level = MailAccess(level)
+        return bool(
+            self._db.execute(
+                "UPDATE accounts SET mail_access = ?, updated_at = ? WHERE email = ?",
+                (level.value, int(time.time()), email.strip().lower()),
             )
         )
 

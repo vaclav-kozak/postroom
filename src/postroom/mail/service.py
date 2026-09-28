@@ -1048,8 +1048,8 @@ class MailService:
                             resolved_to = [original.from_]
 
                     if resolved_subject is None:
-                        subj = original.subject or ""
-                        resolved_subject = subj if subj.lower().startswith("re:") else f"Re: {subj}"
+                        # One line: a decoded Subject may carry an encoded CR or LF.
+                        resolved_subject = _one_line(reply_subject(original.subject))
 
                     in_reply_to, references = _threading_headers(original)
 

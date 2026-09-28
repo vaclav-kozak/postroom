@@ -341,6 +341,31 @@ async def test_reply_threads_and_marks_answered(repo, accounts):
     assert result.saved_to_sent is True
 
 
+MULTILINE_SUBJECT = (
+    b"From: Alice <alice@example.org>\r\nTo: user@example.com\r\n"
+    b"Subject: =?utf-8?q?hello=0D=0AInjected:_x=0Aend?=\r\n"
+    b"Message-ID: <orig@example.org>\r\n\r\nOriginal text\r\n"
+)
+
+
+async def test_reply_to_a_subject_with_encoded_line_breaks_is_one_line(repo, accounts):
+    imap = MailFake({"INBOX": {7: (set(), MULTILINE_SUBJECT)}})
+    smtp = FakeSmtp()
+    await service(repo, {A: imap}, smtp).send(A, to=None, subject=None, body="ok", reply_uid=7)
+    assert parsed(smtp.sent[0][3])["Subject"] == "Re: hello Injected: x end"
+    assert b"\r\nInjected:" not in header_block(smtp.sent[0][3])
+
+
+async def test_reply_draft_to_a_subject_with_encoded_line_breaks_is_one_line(repo, accounts):
+    imap = MailFake({"INBOX": {7: (set(), MULTILINE_SUBJECT)}})
+    await service(repo, {A: imap}).create_draft(
+        A, to=[], subject=None, body="ok", reply_folder="inbox", reply_uid=7
+    )
+    (raw,) = [raw for _flags, raw in imap.boxes["Drafts"].values()]
+    assert parsed(raw)["Subject"] == "Re: hello Injected: x end"
+    assert b"\r\nInjected:" not in header_block(raw)
+
+
 async def test_reply_all_copies_the_original_recipients_except_own(repo, accounts):
     imap = MailFake({"INBOX": {7: (set(), message())}})
     smtp = FakeSmtp()

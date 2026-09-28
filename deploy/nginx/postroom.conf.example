@@ -88,8 +88,10 @@ server {
     }
 
     # MCP Streamable HTTP: responses may stream, and tool calls (e.g. reading a large
-    # mailbox) can take minutes.
+    # mailbox) can take minutes. send_email carries attachments (up to 10 MiB, about 14 MB
+    # as base64 in JSON): a larger body limit here only; 1m everywhere else.
     location /mcp {
+        client_max_body_size 16m;
         proxy_buffering off;
         proxy_cache off;
         proxy_read_timeout 300s;

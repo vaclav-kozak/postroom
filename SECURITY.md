@@ -21,7 +21,8 @@ credited in the advisory unless you prefer otherwise.
 
 ## Threat model and scope
 
-Postroom is a single-owner server. In scope, among others:
+Postroom is a single-owner server. [docs/security.md](docs/security.md) describes how it
+protects the owner's credentials in detail. In scope, among others:
 
 - **Owner-only admin.** The admin UI has exactly one user, authenticated with an argon2-hashed
   password, signed session cookies bound to the password hash, CSRF tokens on every

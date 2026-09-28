@@ -30,7 +30,7 @@ Never commit `.env`, the password file or anything under `data/`; `.gitignore` c
 
 ```sh
 uv run pytest -q                    # unit tests (fast, no network)
-uv run pytest -m integration -q     # integration tests: IMAP and CalDAV/CardDAV servers in Docker
+uv run pytest -m integration -q     # integration tests: GreenMail (Docker) and Radicale
 uv run ruff check .
 uv run ruff format .                # CI runs `ruff format --check .`
 ```
@@ -46,7 +46,8 @@ CI runs all of these on every pull request.
   log or return secrets.
 - Use `example.com`, `example.org` and `user@example.com` in tests and docs, never real
   addresses or hostnames.
-- Update `.env.example` and the docs when you add a setting or change behaviour.
+- Update `.env.example` and the docs (README.md, docs/) when you add a setting, a tool or
+  change behaviour, and add a line under "Unreleased" in [CHANGELOG.md](CHANGELOG.md).
 
 ## Commit messages
 

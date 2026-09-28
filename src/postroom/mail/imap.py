@@ -20,6 +20,7 @@ from imapclient.exceptions import IMAPClientAbortError, IMAPClientError, LoginEr
 from imapclient.imapclient import (
     SocketTimeout,
     _is8bit,
+    _literal,
     datetime_to_INTERNALDATE,
     seq_to_parenstr,
     to_bytes,
@@ -65,7 +66,12 @@ class SafeIMAPClient(IMAPClient):
     def _raw_command(self, command, args, uid=True):
         items = args if isinstance(args, (list, tuple)) else [args]
         for item in items:
-            if isinstance(item, bytes) and not _is8bit(item) and _UNSAFE_ARG.search(item):
+            if (
+                isinstance(item, bytes)
+                and not isinstance(item, _literal)  # length-prefixed message data
+                and not _is8bit(item)
+                and _UNSAFE_ARG.search(item)
+            ):
                 raise UnsafeImapArgument()
         return super()._raw_command(command, args, uid)
 
@@ -76,22 +82,33 @@ class SafeIMAPClient(IMAPClient):
         return super()._normalise_folder(folder_name)
 
     def append(self, folder, msg, flags=(), msg_time=None):
-        """`IMAPClient.append`, without imaplib's line-ending pass when `msg` is already
-        CRLF. imaplib runs `re.sub` over the whole message to turn every line ending into
-        CRLF, and for a large message that holds about five copies of it at once; a sent
-        email or a draft is CRLF already. A message with a bare CR or LF still goes
-        through imaplib, which fixes it."""
-        msg = to_bytes(msg)
-        if _BARE_EOL.search(msg):
-            return super().append(folder, msg, flags, msg_time)
-        mailbox = self._normalise_folder(folder)
-        flags = seq_to_parenstr(flags)
-        time_val = f'"{datetime_to_INTERNALDATE(msg_time)}"' if msg_time else None
-        # What imaplib.IMAP4.append does with these arguments, minus the `re.sub`.
-        self._imap.literal = msg
-        typ, data = self._imap._simple_command("APPEND", mailbox, flags, time_val)
+        """`IMAPClient.append`, sent through imapclient's own command writer instead of
+        imaplib's `append`.
+
+        imaplib runs `re.sub` over the whole message to make every line ending CRLF, which
+        for a large message holds about five copies of it at once. Here a CRLF message (a
+        sent email or a draft) is sent as is, and one with a bare CR or LF is normalised
+        with `bytes.replace`. The message is the command's only literal, so this is a plain
+        RFC 3501 APPEND; the folder and flags go through the same CR/LF/NUL check as every
+        other argument. Costs one copy of the message (two with LITERAL+).
+        """
+        args = [self._normalise_folder(folder)]
+        if flags:
+            args.append(to_bytes(seq_to_parenstr(flags)))
+        if msg_time:
+            args.append(to_bytes(f'"{datetime_to_INTERNALDATE(msg_time)}"'))
+        args.append(_literal(_crlf(to_bytes(msg))))
+        typ, data = self._raw_command(b"APPEND", args, uid=False)
         self._checkok("append", typ, data)
         return data[0]
+
+
+def _crlf(msg: bytes) -> bytes:
+    """`msg` with every CR, LF or CRLF as CRLF (what imaplib's append does), unchanged
+    when it is CRLF already."""
+    if not _BARE_EOL.search(msg):
+        return msg
+    return msg.replace(b"\r\n", b"\n").replace(b"\r", b"\n").replace(b"\n", b"\r\n")
 
 
 def is_safe_imap_value(value: str) -> bool:

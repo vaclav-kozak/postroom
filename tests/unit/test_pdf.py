@@ -80,9 +80,35 @@ def test_zlib_content_bomb_stays_inside_the_child_limit():
 
 def test_hitting_the_memory_limit_is_reported_as_too_complex(monkeypatch):
     # Under pypdf's decompression limit, but tokenising 1 MiB of operators needs ~45 MiB.
+    monkeypatch.setattr(pdf, "PARSE_MEMORY_BYTES", 16 * 1024 * 1024)
+    with pytest.raises(pdf.PdfTooComplex):
+        pdf.extract_text_isolated(make_bomb_pdf(1), 50_000, 50, 20)
+
+
+def test_the_ceiling_bounds_the_whole_child(monkeypatch):
+    # The child starts at 47-75 MiB, so a 64 MiB ceiling leaves too little for the same PDF.
     monkeypatch.setattr(pdf, "CHILD_MEMORY_BYTES", 64 * 1024 * 1024)
     with pytest.raises(pdf.PdfTooComplex):
         pdf.extract_text_isolated(make_bomb_pdf(1), 50_000, 50, 20)
+
+
+def test_a_page_with_1_mib_of_operators_fits_the_default_budget():
+    text, _ = pdf.extract_text_isolated(make_bomb_pdf(1), 50_000, 50, 20)
+    assert text.startswith("ab")
+
+
+def test_the_limit_is_the_current_size_plus_the_parse_budget(monkeypatch):
+    mib = 1024 * 1024
+    monkeypatch.setattr(pdf, "_address_space_bytes", lambda: 60 * mib)
+    assert pdf._address_space_limit(48 * mib, 128 * mib) == 108 * mib
+    monkeypatch.setattr(pdf, "_address_space_bytes", lambda: 100 * mib)
+    assert pdf._address_space_limit(48 * mib, 128 * mib) == 128 * mib
+    monkeypatch.setattr(pdf, "_address_space_bytes", lambda: None)
+    assert pdf._address_space_limit(48 * mib, 128 * mib) == 128 * mib
+
+
+def test_address_space_is_measured():
+    assert pdf._address_space_bytes() > 0
 
 
 def test_child_is_killed_on_timeout(monkeypatch):
@@ -98,3 +124,4 @@ def test_child_is_killed_on_timeout(monkeypatch):
 def test_child_does_not_inherit_the_server_environment(monkeypatch):
     monkeypatch.setenv("POSTROOM_MASTER_KEY", "secret-value")
     assert not any(name.startswith("POSTROOM_") for name in pdf._child_env())
+    assert pdf._child_env()["MALLOC_ARENA_MAX"] == "1"

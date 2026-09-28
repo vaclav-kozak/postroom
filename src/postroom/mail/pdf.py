@@ -5,15 +5,16 @@ PDF whose content stream inflates to 5 MiB of text operators cost +222 MiB, beca
 turns every operator into Python objects. A worker thread can't be stopped or limited, so
 extraction runs in a child Python (`python -m postroom.mail.pdf`) that:
 
-- caps its own address space with RLIMIT_AS, so pypdf gets a MemoryError instead of the
-  kernel OOM-killing the whole container;
+- imports pypdf first, then caps its own address space with RLIMIT_AS, so pypdf gets a
+  MemoryError instead of the kernel OOM-killing the whole container;
 - lowers pypdf's decompression limits, so a zlib bomb fails fast;
 - is killed when it runs past the timeout;
 - gets the PDF on stdin and a minimal environment (no POSTROOM_* secrets), and writes JSON
   to stdout.
 
-The child's whole footprint, startup included, stays under `CHILD_MEMORY_BYTES`, and
-callers run one extraction at a time (heavy-work gate).
+The PDF gets `PARSE_MEMORY_BYTES` on top of the child's footprint after its imports, the
+whole child stays under `CHILD_MEMORY_BYTES`, and callers run one extraction at a time
+(heavy-work gate).
 """
 
 import json
@@ -22,11 +23,20 @@ import resource
 import subprocess
 import sys
 
-# Address-space ceiling of the child. Python + pypdf start at ~47 MiB of virtual memory
-# (34 MiB RSS), which leaves ~50 MiB for one PDF. Measured: ordinary PDFs peak at 37 MiB
-# RSS, a page with 1 MiB of text operators at 78 MiB, and the 5 MiB content bomb stops
-# with MemoryError at 84 MiB (it reached 253 MiB without the ceiling).
-CHILD_MEMORY_BYTES = 96 * 1024 * 1024
+# Address space the PDF may use, on top of the child's footprint once pypdf is imported.
+# The limit is applied after the imports because that footprint depends on the build, and
+# is only known then (virtual size after `import pypdf`):
+#   - python:3.13-slim-bookworm image (.pyc prebuilt): 48 MiB (37 MiB RSS);
+#   - uv's python-build-standalone 3.13.12/3.13.15: 60 MiB with .pyc cached, and 75 MiB
+#     (peak 103 MiB) when the child has to compile pypdf first, as in a fresh CI venv.
+# A fixed 96 MiB ceiling set before the imports therefore failed on every PDF on the
+# standalone builds. Measured with the old 96 MiB/48 MiB split: ordinary PDFs peak at
+# 37 MiB RSS, a page with 1 MiB of text operators at 78 MiB, and the 5 MiB content bomb
+# stops with MemoryError at 84 MiB (it reached 253 MiB without a limit).
+PARSE_MEMORY_BYTES = 48 * 1024 * 1024
+# Hard ceiling of the child's whole address space, whatever its import footprint: the
+# production image lands at ~96 MiB, a cold standalone build at ~123 MiB.
+CHILD_MEMORY_BYTES = 128 * 1024 * 1024
 # Per-stream decompression cap inside the child. Page content beyond ~1.5 MiB already
 # exhausts the memory ceiling when tokenised, so bigger streams can only be bombs.
 MAX_DECOMPRESSED_BYTES = 8 * 1024 * 1024
@@ -61,20 +71,44 @@ def extract_text(data: bytes, max_chars: int, max_pages: int) -> tuple[str, int 
     return "\n\n".join(pages)[: max_chars + 1], (page_count if page_count > max_pages else None)
 
 
-def _child_command(max_chars: int, max_pages: int, memory_bytes: int) -> list[str]:
+def _child_command(
+    max_chars: int, max_pages: int, parse_bytes: int, ceiling_bytes: int
+) -> list[str]:
     return [
         sys.executable,
         "-m",
         "postroom.mail.pdf",
         str(max_chars),
         str(max_pages),
-        str(memory_bytes),
+        str(parse_bytes),
+        str(ceiling_bytes),
     ]
 
 
 def _child_env() -> dict[str, str]:
     """Only what the child needs to start; the server's secrets stay out of it."""
-    return {k: v for k, v in os.environ.items() if k in ("PATH", "PYTHONPATH", "LANG", "LC_ALL")}
+    env = {k: v for k, v in os.environ.items() if k in ("PATH", "PYTHONPATH", "LANG", "LC_ALL")}
+    # One malloc arena: a second glibc arena reserves 64 MiB of address space up front.
+    env["MALLOC_ARENA_MAX"] = "1"
+    return env
+
+
+def _address_space_bytes() -> int | None:
+    """This process's current virtual size (what RLIMIT_AS counts), or None if unknown."""
+    try:
+        with open("/proc/self/statm", "rb") as f:
+            return int(f.read().split()[0]) * os.sysconf("SC_PAGE_SIZE")
+    except (OSError, ValueError, IndexError):
+        return None
+
+
+def _address_space_limit(parse_bytes: int, ceiling_bytes: int) -> int:
+    """RLIMIT_AS for the child: its current size plus the parse budget, never above the
+    ceiling nor above a hard limit it already has."""
+    used = _address_space_bytes()
+    limit = ceiling_bytes if used is None else min(used + parse_bytes, ceiling_bytes)
+    hard = resource.getrlimit(resource.RLIMIT_AS)[1]
+    return limit if hard == resource.RLIM_INFINITY else min(limit, hard)
 
 
 def extract_text_isolated(
@@ -86,7 +120,7 @@ def extract_text_isolated(
     Raises `TimeoutError` (child killed), `PdfTooComplex` (memory ceiling hit) or
     `PdfError` (anything else). Blocks: call it from a worker thread.
     """
-    cmd = _child_command(max_chars, max_pages, CHILD_MEMORY_BYTES)
+    cmd = _child_command(max_chars, max_pages, PARSE_MEMORY_BYTES, CHILD_MEMORY_BYTES)
     try:
         proc = subprocess.run(  # fixed argv: our own interpreter and module, no shell
             cmd,
@@ -114,9 +148,11 @@ def extract_text_isolated(
 
 
 def _child_main(argv: list[str]) -> int:
-    max_chars, max_pages, memory_bytes = (int(a) for a in argv)
-    resource.setrlimit(resource.RLIMIT_AS, (memory_bytes, memory_bytes))
+    max_chars, max_pages, parse_bytes, ceiling_bytes = (int(a) for a in argv)
     try:
+        # Unlimited until pypdf is imported and configured: this footprint is fixed by the
+        # interpreter and the installed pypdf, not by the PDF, which is read only after the
+        # limit is in place.
         import logging
 
         import pypdf
@@ -138,6 +174,8 @@ def _child_main(argv: list[str]) -> int:
                 if hasattr(pypdf.Configuration, name)
             }
         )
+        limit = _address_space_limit(parse_bytes, ceiling_bytes)
+        resource.setrlimit(resource.RLIMIT_AS, (limit, limit))
         text, pages = extract_text(sys.stdin.buffer.read(), max_chars, max_pages)
         out = {"text": text, "pages": pages}
     except MemoryError:

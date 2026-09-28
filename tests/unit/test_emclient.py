@@ -109,6 +109,51 @@ def test_parse_accounts():
     assert (b.imap_port, b.imap_security, b.caldav_url) == (143, "starttls", None)
     g = accs["me@gmail.com"]
     assert g.provider == Provider.GOOGLE and g.password is None
+    # SMTP comes along when the export has it (same login and password as IMAP).
+    assert (a.smtp_host, a.smtp_port, a.smtp_security, a.smtp_username) == (
+        "mail.example.com",
+        465,
+        "ssl",
+        None,
+    )
+    assert b.smtp_host is None
+    assert g.smtp_host is None
+
+
+def _smtp_only(*protos, password="pw"):
+    xml = build(accounts=[account("c@example.com", "c@example.com", list(protos), enc(password))])
+    (c,) = parse_emclient_export(xml, PASS)
+    return c
+
+
+def test_smtp_import_variants():
+    imap = proto("IMAP", "imap.example.com", "993", "SSL")
+    login = f'<LoginName xmlns="{E}">c-sender</LoginName>'
+    c = _smtp_only(imap, proto("SMTP", "SMTP.example.com", "", "TLS", extra=login))
+    assert (c.smtp_host, c.smtp_port, c.smtp_security, c.smtp_username) == (
+        "smtp.example.com",
+        587,
+        "starttls",
+        "c-sender",
+    )
+    # Its own, different password: the stored IMAP password would not work; skipped.
+    other = f'<Password xmlns="{E}">{enc("another")}</Password>'
+    assert (
+        _smtp_only(imap, proto("SMTP", "smtp.example.com", "465", "SSL", extra=other)).smtp_host
+        is None
+    )
+    same = f'<Password xmlns="{E}">{enc("pw")}</Password>'
+    assert _smtp_only(imap, proto("SMTP", "smtp.example.com", "465", "SSL", extra=same)).smtp_host
+    # Unusable values are skipped rather than stored.
+    assert _smtp_only(imap, proto("SMTP", "smtp example.com", "465", "SSL")).smtp_host is None
+    assert _smtp_only(imap, proto("SMTP", "smtp.example.com", "99999", "SSL")).smtp_host is None
+
+
+def test_apply_import_stores_smtp(repo):
+    apply_import(repo, parse_emclient_export(XML, PASS))
+    a = repo.get("a@example.com")
+    assert (a.smtp_host, a.smtp_port, a.smtp_security) == ("mail.example.com", 465, "ssl")
+    assert a.can_send and not repo.get("b@example.org").can_send
 
 
 def test_wrong_passphrase_detected():

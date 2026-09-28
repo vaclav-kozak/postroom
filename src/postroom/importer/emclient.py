@@ -34,6 +34,12 @@ class ImportedAccount:
     password: str | None
     caldav_url: str | None
     carddav_url: str | None
+    # Outgoing mail (None: not in the export, or not importable). It logs in with the same
+    # stored password as IMAP, so an SMTP server with a different password is skipped.
+    smtp_host: str | None = None
+    smtp_port: int | None = None
+    smtp_security: str | None = None
+    smtp_username: str | None = None
 
 
 def _xor(value: str, key: str) -> str:
@@ -62,6 +68,28 @@ def decode_secret(value: str, mode: str, passphrase: str | None) -> str:
 
 def _security(value: str | None) -> str:
     return "ssl" if (value or "").upper() == "SSL" else "starttls"
+
+
+def _smtp(
+    proto, imap_login: str, imap_password: str | None, mode: str, passphrase: str | None
+) -> tuple[str, int, str, str | None] | None:
+    """(host, port, security, username or None for "same as IMAP") of the SMTP protocol, or
+    None when there is none or it cannot be used as-is."""
+    if proto is None:
+        return None
+    host = (proto.findtext(f"{NS_PROTO}Server") or "").strip().lower()
+    if not host or any(ch.isspace() or ch in "/@:?#" for ch in host):
+        return None
+    security = _security(proto.findtext(f"{NS_PROTO}Encryption"))
+    port_text = (proto.findtext(f"{NS_PROTO}Port") or "").strip()
+    if port_text and not (port_text.isdigit() and 1 <= int(port_text) <= 65535):
+        return None
+    port = int(port_text) if port_text else (465 if security == "ssl" else 587)
+    own_password = proto.findtext(f"{NS_ACC}Password")
+    if own_password and decode_secret(own_password.strip(), mode, passphrase) != imap_password:
+        return None
+    login = (proto.findtext(f"{NS_ACC}LoginName") or "").strip()
+    return host, port, security, (login if login and login != imap_login else None)
 
 
 def parse_emclient_export(xml: bytes, passphrase: str | None) -> list[ImportedAccount]:
@@ -102,6 +130,11 @@ def parse_emclient_export(xml: bytes, passphrase: str | None) -> list[ImportedAc
         cal = protos.get("CalDav")
         card = protos.get("CardDav")
         login_name = (imap.findtext(f"{NS_ACC}LoginName") if imap is not None else None) or login
+        # Google accounts send through smtp.gmail.com with their Google sign-in: nothing to import.
+        smtp = (
+            None if is_google else _smtp(protos.get("SMTP"), login_name, password, mode, passphrase)
+        )
+        smtp_host, smtp_port, smtp_security, smtp_username = smtp or (None, None, None, None)
         result.append(
             ImportedAccount(
                 email=email,
@@ -116,6 +149,10 @@ def parse_emclient_export(xml: bytes, passphrase: str | None) -> list[ImportedAc
                 password=password,
                 caldav_url=None if is_google else _dav_url(cal),
                 carddav_url=None if is_google else _dav_url(card),
+                smtp_host=smtp_host,
+                smtp_port=smtp_port,
+                smtp_security=smtp_security,
+                smtp_username=smtp_username,
             )
         )
     return result
@@ -152,6 +189,10 @@ def apply_import(repo: AccountRepo, accounts: list[ImportedAccount]) -> list[tup
             carddav_url=a.carddav_url,
             secret=a.password,
             status=status,
+            smtp_host=a.smtp_host,
+            smtp_port=a.smtp_port,
+            smtp_security=a.smtp_security,
+            smtp_username=a.smtp_username,
         )
         actions.append((a.email, "updated" if existing else "created"))
     return actions

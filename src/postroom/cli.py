@@ -56,9 +56,10 @@ def _cmd_import_emclient(args: argparse.Namespace) -> int:
     if args.dry_run:
         for a in accounts:
             dav = "yes" if (a.caldav_url or a.carddav_url) else "no"
+            smtp = f"{a.smtp_host}:{a.smtp_port}/{a.smtp_security}" if a.smtp_host else "none"
             print(
                 f"dry-run: {a.email} {a.provider.value} "
-                f"{a.imap_host}:{a.imap_port}/{a.imap_security} dav={dav}"
+                f"{a.imap_host}:{a.imap_port}/{a.imap_security} smtp={smtp} dav={dav}"
             )
         return 0
 

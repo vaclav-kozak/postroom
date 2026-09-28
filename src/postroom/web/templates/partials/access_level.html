@@ -1,0 +1,20 @@
+{#- The account's mail access level: a form section with one radio per level. Needs `f`
+    (an AccountForm) and `access_levels` ([(value, label, description)]). -#}
+<fieldset class="form-section">
+  <legend class="section-title">Access level</legend>
+  <p class="section-hint">What Claude may do in this mailbox. Calendars, tasks and contacts are not affected.</p>
+  <div class="fields">
+    <fieldset class="choices span-6">
+      <legend class="sr-only">Mail access level</legend>
+      {% for value, label, description in access_levels %}
+      <label class="choice" for="mail_access-{{ value }}">
+        <input type="radio" id="mail_access-{{ value }}" name="mail_access" value="{{ value }}" {% if f.mail_access == value %}checked{% endif %} aria-describedby="mail_access-{{ value }}-desc">
+        <span class="choice-body">
+          <span class="choice-label">{{ label }}</span>
+          <span class="choice-desc" id="mail_access-{{ value }}-desc">{{ description }}</span>
+        </span>
+      </label>
+      {% endfor %}
+    </fieldset>
+  </div>
+</fieldset>

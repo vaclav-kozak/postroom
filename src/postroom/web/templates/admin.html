@@ -9,6 +9,7 @@
   "needs_google_connect": "Needs Google sign-in",
 } %}
 {% set status_tones = {"connected": "ok", "pending": "neutral"} %}
+{% set access_labels = {"read": "Read only", "organize": "Read + organize", "full": "Full access"} %}
 {% set connected = accounts | selectattr("enabled") | selectattr("status.value", "equalto", "connected") | list %}
 {% if flash %}<p class="notice notice-ok" role="status">{{ flash }}</p>{% endif %}
 
@@ -56,7 +57,12 @@
           <span class="acct-email">{{ a.email }}</span>
           <span class="tag">{% if a.provider.value == "google" %}Google{% else %}IMAP{% endif %}</span>
           {% if a.display_name %}<span class="acct-name">{{ a.display_name }}</span>{% endif %}
-          <ul class="chips" aria-label="Can use">{% for c in a.capabilities %}<li class="chip">{{ c }}</li>{% endfor %}</ul>
+          {% set lvl = a.mail_access.value %}
+          <ul class="chips" aria-label="Can use">
+            <li class="chip chip-level" title="Mail access level">{{ access_labels.get(lvl, lvl) }}</li>
+            {% if a.can_send %}<li class="chip chip-send">Sends mail</li>{% elif lvl == "full" %}<li class="chip">No SMTP server</li>{% endif %}
+            {% for c in a.capabilities if not c.startswith("mail") %}<li class="chip">{{ c }}</li>{% endfor %}
+          </ul>
         </td>
         <td data-label="Status" class="cell-status">
           {% if a.enabled %}
@@ -67,6 +73,8 @@
           <span class="meta">Checked {{ a.last_check_at | ts }}</span>
           {% if st != "connected" and a.last_ok_at %}<span class="meta">Last OK {{ a.last_ok_at | ts }}</span>{% endif %}
           {% if a.last_error %}<span class="row-error">{{ a.last_error }}</span>{% endif %}
+          {% if a.smtp_status and a.smtp_status.value != "ok" %}<span class="row-warn">{{ a.smtp_error or "SMTP: login failed" }}</span>
+          {% elif a.smtp_status and a.smtp_configured %}<span class="meta">SMTP OK {{ a.smtp_checked_at | ts }}</span>{% endif %}
         </td>
         <td class="cell-actions">
           <div class="row-actions">
@@ -74,11 +82,8 @@
               <input type="hidden" name="csrf" value="{{ csrf }}">
               <button type="submit" class="btn btn-secondary btn-small">Test now</button>
             </form>
-            {% if a.provider.value == "google" %}
-              {% if google_enabled %}<a class="btn btn-secondary btn-small" href="/admin/google/connect?account_id={{ a.id }}">Reconnect</a>{% endif %}
-            {% else %}
-              <a class="btn btn-secondary btn-small" href="/admin/accounts/{{ a.id }}/edit">Edit</a>
-            {% endif %}
+            <a class="btn btn-secondary btn-small" href="/admin/accounts/{{ a.id }}/edit">Edit</a>
+            {% if a.provider.value == "google" and google_enabled %}<a class="btn btn-secondary btn-small" href="/admin/google/connect?account_id={{ a.id }}">Reconnect</a>{% endif %}
             <form method="post" action="/admin/accounts/{{ a.id }}/toggle" class="inline">
               <input type="hidden" name="csrf" value="{{ csrf }}">
               <button type="submit" class="btn btn-secondary btn-small">{% if a.enabled %}Disable{% else %}Enable{% endif %}</button>

@@ -715,6 +715,69 @@ select {
 .span-6 {
   grid-column: span 6;
 }
+/* A group of radio choices inside .fields: one bordered row per option. */
+.choices {
+  display: grid;
+  gap: var(--s-2);
+  margin: 0;
+  padding: 0;
+  border: 0;
+  min-width: 0;
+}
+.choice {
+  display: flex;
+  align-items: flex-start;
+  gap: var(--s-3);
+  padding: var(--s-3) var(--s-4);
+  font-weight: 400;
+  background: var(--field-bg);
+  border: 1px solid var(--rule-strong);
+  border-radius: var(--radius-ctl);
+  cursor: pointer;
+}
+.choice:hover {
+  border-color: var(--muted);
+}
+.choice:has(input:checked) {
+  border-color: var(--airmail);
+  box-shadow: inset 0 0 0 1px var(--airmail);
+}
+.choice input {
+  width: 18px;
+  height: 18px;
+  margin: 3px 0 0;
+  flex: none;
+  accent-color: var(--airmail);
+}
+.choice input:focus-visible {
+  outline: 3px solid var(--focus);
+  outline-offset: 2px;
+}
+.choice-body {
+  display: flex;
+  flex-direction: column;
+}
+.choice-label {
+  font-weight: 600;
+}
+.choice-desc {
+  color: var(--muted);
+  font-size: var(--step--1);
+}
+/* The SMTP suggestion (app.js): shown only when the script runs and has one to offer. */
+.suggest {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--s-2) var(--s-3);
+  margin: calc(-1 * var(--s-2)) 0 0;
+  padding: var(--s-2) var(--s-3);
+  font-size: var(--step--1);
+  color: var(--warn-fg);
+  background: var(--warn-bg);
+  border: 1px solid var(--warn-rule);
+  border-radius: var(--radius-ctl);
+}
 .sheet > .form-actions {
   padding: var(--s-5) 0;
 }
@@ -737,6 +800,16 @@ select {
 }
 .letter h1 {
   font-size: var(--step-2);
+}
+.grants {
+  margin: 0;
+  padding-left: 1.25rem;
+}
+.grants li + li {
+  margin-top: var(--s-1);
+}
+.grant-send {
+  font-weight: 600;
 }
 .address {
   padding: var(--s-4) var(--s-5);
@@ -944,6 +1017,26 @@ td.num {
   color: var(--bad-fg);
   font-size: 0.8125rem;
   overflow-wrap: anywhere;
+}
+.row-warn {
+  display: block;
+  margin-top: var(--s-1);
+  max-width: 36ch;
+  padding: 1px var(--s-2);
+  color: var(--warn-fg);
+  background: var(--warn-bg);
+  border-left: 3px solid var(--warn-rule);
+  font-size: 0.8125rem;
+  overflow-wrap: anywhere;
+}
+.chip-level {
+  color: var(--text);
+  background: transparent;
+  box-shadow: inset 0 0 0 1px var(--rule-strong);
+}
+.chip-send {
+  color: var(--ok-fg);
+  background: var(--ok-bg);
 }
 tr.is-disabled .cell-account,
 tr.is-disabled .chips {

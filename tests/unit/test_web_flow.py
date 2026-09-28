@@ -142,6 +142,7 @@ async def test_full_oauth_flow_and_mcp_call(http):
 
     page = await http.get(path)
     assert "claude.ai" in page.text and "Claude" in page.text
+    assert "Sending is not enabled on any account." in page.text
     txn = parse_qs(urlparse(consent_url).query)["txn"][0]
     r = await http.post("/consent", data={"txn": txn, "action": "allow", "csrf": csrf(page.text)})
     assert r.status_code == 303

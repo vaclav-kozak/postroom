@@ -4,7 +4,7 @@
 <div class="page-head">
   <p class="crumb"><a href="/admin">Accounts</a></p>
   <h1>{% if account %}Edit {{ account.email }}{% else %}Add IMAP account{% endif %}</h1>
-  <p class="lede">A test login runs before anything is saved.</p>
+  <p class="lede">Test logins (incoming mail, and outgoing mail when set) run before anything is saved.</p>
 </div>
 {% if error %}<p class="notice notice-bad" role="alert">{{ error }}</p>{% endif %}
 <form method="post" action="{% if account %}/admin/accounts/{{ account.id }}{% else %}/admin/accounts{% endif %}" class="sheet">
@@ -59,6 +59,41 @@
   </fieldset>
 
   <fieldset class="form-section">
+    <legend class="section-title">Outgoing mail (SMTP) <span class="optional">optional</span></legend>
+    <div class="section-hint">
+      <p>Leave the host empty to disable sending for this account.</p>
+      <p>Sending logs in with the same password as incoming mail.</p>
+    </div>
+    <div class="fields">
+      <div class="field span-4">
+        <label for="smtp_host">SMTP server</label>
+        <input id="smtp_host" name="smtp_host" type="text" value="{{ f.smtp_host }}" placeholder="smtp.example.com" spellcheck="false" autocapitalize="off" aria-describedby="smtp-suggest">
+      </div>
+      <div class="field span-2">
+        <label for="smtp_port">Port</label>
+        <input id="smtp_port" name="smtp_port" type="number" min="1" max="65535" value="{{ f.smtp_port }}">
+      </div>
+      <p class="suggest span-6" id="smtp-suggest" role="status" hidden>
+        <span class="suggest-text"></span>
+        <button type="button" class="btn btn-secondary btn-small" id="smtp-suggest-use">Use these</button>
+      </p>
+      <div class="field span-3">
+        <label for="smtp_security">Security</label>
+        <select id="smtp_security" name="smtp_security">
+          <option value="ssl" {% if f.smtp_security == "ssl" %}selected{% endif %}>SSL/TLS (port 465)</option>
+          <option value="starttls" {% if f.smtp_security == "starttls" %}selected{% endif %}>STARTTLS (port 587)</option>
+        </select>
+      </div>
+      <div class="field span-3">
+        <label for="smtp_username">Username <span class="optional">optional</span></label>
+        <input id="smtp_username" name="smtp_username" type="text" value="{{ f.smtp_username }}" placeholder="same as IMAP username" autocomplete="off" spellcheck="false" autocapitalize="off">
+      </div>
+    </div>
+  </fieldset>
+
+  {% include "partials/access_level.html" %}
+
+  <fieldset class="form-section">
     <legend class="section-title">Calendar &amp; contacts <span class="optional">optional</span></legend>
     <div class="section-hint">
       <p>Fill these in to use calendars, tasks and contacts. For SOGo/mailcow servers
@@ -82,12 +117,14 @@
       an optional <p class="section-hint">, then a <div class="fields"> 6-column grid holding one
       <div class="field span-N"> (N = 2, 3, 4 or 6) per <label> + input. Example:
     <fieldset class="form-section">
-      <legend class="section-title">Access level</legend>
-      <p class="section-hint">What Claude may do in this mailbox.</p>
+      <legend class="section-title">Signature</legend>
+      <p class="section-hint">Added below emails Claude writes.</p>
       <div class="fields">
-        <div class="field span-3"><label for="access">Access</label><select id="access" name="access">…</select></div>
+        <div class="field span-6"><label for="signature">Signature</label><input id="signature" name="signature" type="text"></div>
       </div>
-    </fieldset> -#}
+    </fieldset>
+    A group of choices (radio buttons) is a nested <fieldset class="choices">: see
+    partials/access_level.html. -#}
 
   <div class="form-actions form-actions-end">
     <a class="btn btn-secondary" href="/admin">Cancel</a>

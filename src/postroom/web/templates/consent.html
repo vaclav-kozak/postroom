@@ -5,8 +5,14 @@
 <section class="letter card-narrow">
   <div class="letter-inner">
     <h1>Allow access to your mailboxes?</h1>
-    <p class="lede">An application is asking for access to this server. After approval it can read
-    every connected mailbox and save drafts.</p>
+    <p class="lede">An application is asking for access to this server. If you allow it, it can:</p>
+    <ul class="grants">
+      <li>{{ grants.read }}</li>
+      <li>{{ grants.organize }}</li>
+      <li class="grant-send">{{ grants.send }}</li>
+      <li>{{ grants.pim }}</li>
+    </ul>
+    <p class="hint">The access level of each account is set in the admin UI and applies at once.</p>
     <div class="address">
       <p class="label">Access will be sent to</p>
       <p class="redirect-host"><strong>{{ redirect_host }}</strong></p>

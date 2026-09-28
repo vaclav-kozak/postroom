@@ -25,6 +25,7 @@ from starlette.responses import (
     Response,
 )
 
+from postroom.accounts import MailAccess
 from postroom.auth.owner import client_ip, safe_next
 from postroom.web.security import ROBOTS_TXT
 
@@ -134,6 +135,33 @@ def login_redirect(request: Request) -> RedirectResponse:
     if request.url.query:
         target += "?" + request.url.query
     return RedirectResponse(f"/login?next={quote(target, safe='')}", status_code=302)
+
+
+def _accounts(n: int) -> str:
+    return f"{n} account" if n == 1 else f"{n} accounts"
+
+
+def consent_grants(accounts) -> dict[str, str]:
+    """What an approved client may do, per the owner's current account settings (enabled
+    accounts only; the levels can change later in the admin UI)."""
+    total = len(accounts)
+    organize = sum(1 for a in accounts if a.allows(MailAccess.ORGANIZE))
+    send = sum(1 for a in accounts if a.can_send)
+    return {
+        "read": f"Read and search mail and save drafts in {_accounts(total)}.",
+        "organize": (
+            "Organize mail (mark read, star, move, archive, trash, create folders) in "
+            + ("all of them." if organize == total else f"{organize} of them.")
+            if organize
+            else "Organizing mail is not enabled on any account."
+        ),
+        "send": (
+            f"Sending is enabled on {_accounts(send)}: it can send email as you there."
+            if send
+            else "Sending is not enabled on any account."
+        ),
+        "pim": "Use calendars, tasks and contacts where they are connected.",
+    }
 
 
 def register_pages(mcp: FastMCP, services: Services) -> None:
@@ -263,6 +291,7 @@ def register_pages(mcp: FastMCP, services: Services) -> None:
             redirect_host=urlparse(redirect_uri).hostname or redirect_uri,
             redirect_uri=redirect_uri,
             scopes=" ".join(params.scopes or ["mcp"]),
+            grants=consent_grants(services.repo.list(include_disabled=False)),
         )
 
     @mcp.custom_route("/consent", methods=["POST"], include_in_schema=False)

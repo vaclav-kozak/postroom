@@ -1,4 +1,5 @@
-"""Owner admin UI: accounts, Google connect, API keys and OAuth clients.
+"""Owner admin UI: accounts (incoming and outgoing mail, access level), Google connect,
+API keys and OAuth clients.
 
 Every route requires the owner session (else 302 to /login); every POST also requires the
 session's CSRF token (else 403). Flash messages come only from the fixed `MESSAGES` map.
@@ -19,10 +20,11 @@ from itsdangerous import BadSignature, URLSafeTimedSerializer
 from starlette.requests import Request
 from starlette.responses import RedirectResponse, Response
 
-from postroom.accounts import Account, AccountStatus, Provider
+from postroom.accounts import Account, AccountStatus, MailAccess, Provider, SmtpStatus
 from postroom.crypto import SecretError, new_token, pkce_pair
 from postroom.google.oauth import GoogleOAuthError
 from postroom.mail.imap import ImapError
+from postroom.mail.smtp import SmtpError
 from postroom.web.pages import form_data, login_redirect, message_page, render
 
 if TYPE_CHECKING:
@@ -38,6 +40,7 @@ MESSAGES = {
     "confirm_mismatch": "Type the account email to confirm removal.",
     "check_ok": "Connection OK.",
     "check_failed": "Connection failed — see the account's last error.",
+    "check_smtp_failed": "Incoming mail OK, but the SMTP test failed — see the account's SMTP error.",
     "google_disabled": "Google OAuth is not configured.",
     "google_denied": "Google authorization was cancelled.",
     "google_connected": "Google account connected.",
@@ -54,6 +57,24 @@ IMPORT_COMMAND = (
     " < export-with-passphrase.txt"
 )
 MAX_FIELD = 320
+ACCESS_LEVELS = [
+    (MailAccess.READ.value, "Read", "Search and read mail, and create drafts."),
+    (
+        MailAccess.ORGANIZE.value,
+        "Organize",
+        "Also mark read or unread, star, move, archive, trash, and create folders.",
+    ),
+    (MailAccess.FULL.value, "Full", "Also send mail (needs an outgoing mail server)."),
+]
+DEFAULT_SMTP_PORTS = {"ssl": "465", "starttls": "587"}
+
+
+def _host_ok(host: str) -> bool:
+    return bool(host) and not any(ch.isspace() or ch in "/@:?#" for ch in host)
+
+
+def _port_ok(port: str) -> bool:
+    return port.isdigit() and 1 <= int(port) <= 65535
 
 
 def _dav_url_ok(url: str) -> bool:
@@ -80,12 +101,22 @@ class AccountForm:
     imap_username: str = ""
     caldav_url: str = ""
     carddav_url: str = ""
+    smtp_host: str = ""
+    smtp_port: str = "465"
+    smtp_security: str = "ssl"
+    smtp_username: str = ""
+    mail_access: str = MailAccess.FULL.value
 
     @classmethod
-    def from_form(cls, form: dict[str, str]) -> AccountForm:
+    def from_form(
+        cls, form: dict[str, str], mail_access: str = MailAccess.FULL.value
+    ) -> AccountForm:
+        """`mail_access` is used when the form has no access level (e.g. an older page)."""
+
         def get(name: str, default: str = "") -> str:
             return form.get(name, default).strip()[:MAX_FIELD]
 
+        smtp_security = get("smtp_security", "ssl")
         return cls(
             email=get("email").lower(),
             display_name=get("display_name"),
@@ -95,6 +126,11 @@ class AccountForm:
             imap_username=get("imap_username"),
             caldav_url=get("caldav_url"),
             carddav_url=get("carddav_url"),
+            smtp_host=get("smtp_host").lower(),
+            smtp_port=get("smtp_port") or DEFAULT_SMTP_PORTS.get(smtp_security, ""),
+            smtp_security=smtp_security,
+            smtp_username=get("smtp_username"),
+            mail_access=get("mail_access") or mail_access,
         )
 
     @classmethod
@@ -108,6 +144,11 @@ class AccountForm:
             imap_username=a.imap_username or "",
             caldav_url=a.caldav_url or "",
             carddav_url=a.carddav_url or "",
+            smtp_host=a.smtp_host or "",
+            smtp_port=str(a.smtp_port or DEFAULT_SMTP_PORTS.get(a.smtp_security or "ssl")),
+            smtp_security=a.smtp_security or "ssl",
+            smtp_username=a.smtp_username or "",
+            mail_access=a.mail_access.value,
         )
 
     def validate(self, password: str, password_required: bool) -> str | None:
@@ -119,13 +160,23 @@ class AccountForm:
             or any(ch.isspace() for ch in email)
         ):
             return "Enter a valid email address."
-        host = self.imap_host
-        if not host or any(ch.isspace() or ch in "/@:?#" for ch in host):
+        if not _host_ok(self.imap_host):
             return "Enter the IMAP server host name."
-        if not self.imap_port.isdigit() or not 1 <= int(self.imap_port) <= 65535:
+        if not _port_ok(self.imap_port):
             return "Port must be a number between 1 and 65535."
         if self.imap_security not in ("ssl", "starttls"):
             return "Security must be SSL or STARTTLS."
+        if self.smtp_host:
+            if not _host_ok(self.smtp_host):
+                return "Enter the SMTP server host name, or leave it empty to disable sending."
+            if not _port_ok(self.smtp_port):
+                return "SMTP port must be a number between 1 and 65535."
+            if self.smtp_security not in ("ssl", "starttls"):
+                return "SMTP security must be SSL/TLS or STARTTLS."
+            if any(ch.isspace() or ord(ch) < 32 for ch in self.smtp_username):
+                return "The SMTP username must not contain spaces."
+        if self.mail_access not in {level.value for level in MailAccess}:
+            return "Choose an access level."
         if password_required and not password:
             return "Enter the password."
         for url in (self.caldav_url, self.carddav_url):
@@ -152,12 +203,29 @@ class AccountForm:
             last_error=None,
             last_ok_at=None,
             last_check_at=None,
+            mail_access=MailAccess(self.mail_access),
+            smtp_host=self.smtp_host or None,
+            smtp_port=int(self.smtp_port) if self.smtp_host else None,
+            smtp_security=self.smtp_security if self.smtp_host else None,
+            smtp_username=self.smtp_username or None if self.smtp_host else None,
         )
+
+    def save_outgoing(self, repo, email: str) -> None:
+        """Store the SMTP settings and the access level (the IMAP ones go through upsert)."""
+        repo.set_smtp(
+            email,
+            host=self.smtp_host or None,
+            port=int(self.smtp_port) if self.smtp_host else None,
+            security=self.smtp_security,
+            username=self.smtp_username or None,
+        )
+        repo.set_mail_access(email, self.mail_access)
 
 
 def _safe_error(e: Exception) -> str:
     """Error text for the owner. IMAP/Google messages are written to be secret-free."""
-    text = str(e) if isinstance(e, (ImapError, GoogleOAuthError)) else f"{type(e).__name__}: {e}"
+    safe = (ImapError, GoogleOAuthError, SmtpError)
+    text = str(e) if isinstance(e, safe) else f"{type(e).__name__}: {e}"
     return text[:300]
 
 
@@ -212,7 +280,29 @@ def register_admin(mcp: FastMCP, services: Services) -> None:
     def form_page(
         request: Request, f: AccountForm, account: Account | None, error: str | None, status: int
     ) -> Response:
-        return page(request, "account_form.html", status=status, f=f, account=account, error=error)
+        return page(
+            request,
+            "account_form.html",
+            status=status,
+            f=f,
+            account=account,
+            error=error,
+            access_levels=ACCESS_LEVELS,
+        )
+
+    def google_page(
+        request: Request, account: Account, f: AccountForm, error: str | None, status: int
+    ) -> Response:
+        return page(
+            request,
+            "account_google.html",
+            status=status,
+            f=f,
+            account=account,
+            error=error,
+            access_levels=ACCESS_LEVELS,
+            google_enabled=services.google is not None,
+        )
 
     async def test_login(f: AccountForm, password: str) -> str | None:
         """One login + logout with the submitted settings; returns an error text or None."""
@@ -228,7 +318,20 @@ def register_admin(mcp: FastMCP, services: Services) -> None:
             await asyncio.to_thread(work)
         except Exception as e:  # noqa: BLE001 -- any failure is shown to the owner
             return f"Test login failed — {_safe_error(e)}"
+        if f.smtp_host:
+            # One SMTP login + QUIT with the submitted settings; nothing is sent.
+            try:
+                await asyncio.to_thread(
+                    services.mail.smtp.connector.check, f.to_account(), password
+                )
+            except Exception as e:  # noqa: BLE001 -- any failure is shown to the owner
+                return f"SMTP test failed — {_safe_error(e)}"
         return None
+
+    def saved(f: AccountForm, email: str) -> None:
+        f.save_outgoing(services.repo, email)
+        if f.smtp_host:
+            services.repo.set_smtp_status(email, SmtpStatus.OK)  # just tested
 
     # ----- overview ---------------------------------------------------------------------------
 
@@ -278,6 +381,7 @@ def register_admin(mcp: FastMCP, services: Services) -> None:
             secret=password,
             status=AccountStatus.CONNECTED,
         )
+        saved(f, f.email)
         services.repo.set_status(f.email, AccountStatus.CONNECTED)
         services.pool.drop(f.email)
         return back("account_added")
@@ -288,9 +392,7 @@ def register_admin(mcp: FastMCP, services: Services) -> None:
         if account is None:
             return not_found(request)
         if account.provider == Provider.GOOGLE:
-            return RedirectResponse(
-                f"/admin/google/connect?account_id={account.id}", status_code=302
-            )
+            return google_page(request, account, AccountForm.from_account(account), None, 200)
         return form_page(request, AccountForm.from_account(account), account, None, 200)
 
     @owner_post("/admin/accounts/{id:int}")
@@ -299,10 +401,8 @@ def register_admin(mcp: FastMCP, services: Services) -> None:
         if account is None:
             return not_found(request)
         if account.provider == Provider.GOOGLE:
-            return message_page(
-                services, request, "Not editable", "Reconnect Google accounts instead.", 400
-            )
-        f = AccountForm.from_form(form)
+            return await google_update(request, account, form)
+        f = AccountForm.from_form(form, mail_access=account.mail_access.value)
         f.email = account.email  # the email is the account's identity; never renamed here
         password = form.get("password", "")
         error = f.validate(password, password_required=False)
@@ -331,17 +431,40 @@ def register_admin(mcp: FastMCP, services: Services) -> None:
             secret=password,
             status=AccountStatus.CONNECTED,
         )
+        saved(f, account.email)
         services.repo.set_status(account.email, AccountStatus.CONNECTED)
         services.pool.drop(account.email)
         return back("account_updated")
 
+    async def google_update(request: Request, account: Account, form: dict[str, str]) -> Response:
+        """Google accounts: only the display name and the access level are editable (the
+        servers and the sign-in come from Google; use Reconnect to sign in again)."""
+        display_name = form.get("display_name", "").strip()[:MAX_FIELD]
+        level = form.get("mail_access", "").strip() or account.mail_access.value
+        if level not in {m.value for m in MailAccess}:
+            f = AccountForm.from_account(account)
+            f.display_name, f.mail_access = display_name, level
+            return google_page(request, account, f, "Choose an access level.", 400)
+        services.repo.set_display_name(account.email, display_name)
+        services.repo.set_mail_access(account.email, level)
+        return back("account_updated")
+
     @owner_post("/admin/accounts/{id:int}/test")
     async def account_test(request: Request, form: dict[str, str]) -> Response:
+        """The owner's check: one IMAP login + NOOP, then, when the account has an outgoing
+        server, one SMTP login + QUIT (never a message). The background checker never
+        tests SMTP, to keep failed logins on the mail server to a minimum."""
         account = account_by_id(request)
         if account is None:
             return not_found(request)
         status = await services.check_account(account.email, True)
-        return back("check_ok" if status == AccountStatus.CONNECTED else "check_failed")
+        if status != AccountStatus.CONNECTED:
+            return back("check_failed")
+        if account.smtp_host or account.can_send:
+            error = await asyncio.to_thread(services.mail.smtp.check, account.email)
+            if error is not None:
+                return back("check_smtp_failed")
+        return back("check_ok")
 
     @owner_post("/admin/accounts/{id:int}/toggle")
     async def account_toggle(request: Request, form: dict[str, str]) -> Response:

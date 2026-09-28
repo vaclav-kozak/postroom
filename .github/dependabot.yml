@@ -16,6 +16,11 @@ updates:
       interval: weekly
     commit-message:
       prefix: chore
+    ignore:
+      # The Python version is chosen deliberately (.python-version, requires-python);
+      # moving to a new minor Python is a manual change, not a bot bump.
+      - dependency-name: python
+        update-types: ["version-update:semver-minor"]
 
   - package-ecosystem: uv
     directory: /

@@ -26,24 +26,24 @@ class FakeMail:
         return SearchResult(
             [
                 MessageSummary(
-                    "a@x.cz",
+                    "a@x.example.com",
                     "INBOX",
                     5,
                     "2026-09-25T10:00:00+00:00",
-                    "p@x.cz",
-                    ["a@x.cz"],
+                    "p@x.example.com",
+                    ["a@x.example.com"],
                     "Hello",
                     False,
                     10,
                     False,
                 )
             ],
-            [AccountError("b@x.cz", "boom")],
+            [AccountError("b@x.example.com", "boom")],
         )
 
     async def create_draft(self, email, **kw):
         self.calls.append(("draft", email, kw))
-        return DraftResult(email, "Drafts", "<m@x.cz>")
+        return DraftResult(email, "Drafts", "<m@x.example.com>")
 
     async def list_folders(self, email, with_counts=False):
         from postroom.mail.models import FolderInfo
@@ -54,7 +54,7 @@ class FakeMail:
 @pytest.fixture
 def server(repo):
     repo.upsert(
-        email="a@x.cz",
+        email="a@x.example.com",
         provider=Provider.IMAP,
         imap_host="h",
         imap_port=993,
@@ -102,7 +102,7 @@ async def test_list_accounts(server):
     async with Client(mcp) as c:
         res = await c.call_tool("list_accounts", {})
     acc = res.data[0] if isinstance(res.data, list) else res.structured_content["result"][0]
-    assert acc["email"] == "a@x.cz"
+    assert acc["email"] == "a@x.example.com"
     # The default level: read and organise, no sending.
     assert acc["capabilities"] == ["mail", "mail.organize"]
     assert acc["mail_access"] == "organize"
@@ -113,15 +113,18 @@ async def test_search_maps_params(server):
     async with Client(mcp) as c:
         res = await c.call_tool(
             "search_emails",
-            {"sender": "p@x.cz", "since": "2026-09-01", "unread_only": True, "limit": 5},
+            {"sender": "p@x.example.com", "since": "2026-09-01", "unread_only": True, "limit": 5},
         )
     _, emails, folder, crit, limit, _offset = mail.calls[0]
     assert emails is None and folder == "inbox" and limit == 5
     assert crit == SearchCriteria(
-        sender="p@x.cz", since=datetime(2026, 9, 1, tzinfo=UTC).date(), unread_only=True
+        sender="p@x.example.com", since=datetime(2026, 9, 1, tzinfo=UTC).date(), unread_only=True
     )
     data = res.structured_content
-    assert data["results"][0]["from"] == "p@x.cz" and data["errors"][0]["account"] == "b@x.cz"
+    assert (
+        data["results"][0]["from"] == "p@x.example.com"
+        and data["errors"][0]["account"] == "b@x.example.com"
+    )
 
 
 async def test_bad_date_is_tool_error(server):
@@ -135,10 +138,11 @@ async def test_create_draft(server):
     mcp, mail = server
     async with Client(mcp) as c:
         res = await c.call_tool(
-            "create_draft", {"account": "a@x.cz", "to": ["z@y.cz"], "subject": "S", "body": "B"}
+            "create_draft",
+            {"account": "a@x.example.com", "to": ["z@y.example.org"], "subject": "S", "body": "B"},
         )
     assert res.structured_content["folder"] == "Drafts"
-    assert mail.calls[0][2]["to"] == ["z@y.cz"]
+    assert mail.calls[0][2]["to"] == ["z@y.example.org"]
 
 
 async def test_create_draft_timeout_does_not_invite_a_duplicate(server, monkeypatch):
@@ -152,7 +156,7 @@ async def test_create_draft_timeout_does_not_invite_a_duplicate(server, monkeypa
     async with Client(mcp) as c:
         res = await c.call_tool(
             "create_draft",
-            {"account": "a@x.cz", "to": ["z@y.cz"], "subject": "S", "body": "B"},
+            {"account": "a@x.example.com", "to": ["z@y.example.org"], "subject": "S", "body": "B"},
             raise_on_error=False,
         )
     text = res.content[0].text
@@ -219,7 +223,7 @@ def reader(repo):
 
 
 async def _attachment(mcp, **extra):
-    args = {"account": "A@X.cz", "folder": "inbox", "uid": 7, "index": 0, **extra}
+    args = {"account": "A@X.example.com", "folder": "inbox", "uid": 7, "index": 0, **extra}
     async with Client(mcp) as c:
         return await c.call_tool("get_attachment", args, raise_on_error=False)
 
@@ -228,7 +232,7 @@ async def test_attachment_text_is_truncated(reader):
     mcp, mail = reader
     mail.attachment = ("text/plain", "příliš žluťoučký kůň".encode() * 10)
     res = await _attachment(mcp, max_chars=30)
-    assert mail.calls[0] == ("get_attachment", "a@x.cz", "inbox", 7, 0)
+    assert mail.calls[0] == ("get_attachment", "a@x.example.com", "inbox", 7, 0)
     data = res.structured_content
     assert data["content_type"] == "text/plain" and data["filename"] == "file"
     assert data["text"].startswith("příliš žluťoučký kůň") and "truncated" in data["text"]
@@ -300,7 +304,9 @@ async def test_mail_errors_become_clean_tool_errors(reader, error, message):
     mail.error = error
     async with Client(mcp) as c:
         res = await c.call_tool(
-            "get_email", {"account": "a@x.cz", "folder": "x", "uid": 1}, raise_on_error=False
+            "get_email",
+            {"account": "a@x.example.com", "folder": "x", "uid": 1},
+            raise_on_error=False,
         )
     assert res.is_error and message in res.content[0].text
     assert "Traceback" not in res.content[0].text

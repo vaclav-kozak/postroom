@@ -94,7 +94,7 @@ def test_check_accounts_cli(monkeypatch, settings, capsys):
 
     repo = AccountRepo(Database(settings.db_path), SecretBox(settings.master_key))
     repo.upsert(
-        email="x@x.cz",
+        email="x@x.example.com",
         provider=Provider.IMAP,
         imap_host="127.0.0.1",
         imap_port=1,
@@ -102,7 +102,7 @@ def test_check_accounts_cli(monkeypatch, settings, capsys):
         secret="p",
     )
     assert cli.main(["check-accounts"]) == 0
-    assert "x@x.cz\terror" in capsys.readouterr().out
+    assert "x@x.example.com\terror" in capsys.readouterr().out
 
 
 def test_set_password_mismatch(monkeypatch, capsys):
@@ -128,7 +128,10 @@ def test_check_accounts_cli_filters_and_skips_locked(monkeypatch, settings, caps
     from postroom.mail.imap import ImapConnector
 
     repo = AccountRepo(Database(settings.db_path), SecretBox(settings.master_key))
-    for email, status in [("a@x.cz", None), ("b@x.cz", AccountStatus.NEEDS_RECONNECT)]:
+    for email, status in [
+        ("a@x.example.com", None),
+        ("b@x.example.com", AccountStatus.NEEDS_RECONNECT),
+    ]:
         repo.upsert(
             email=email,
             provider=Provider.IMAP,
@@ -146,10 +149,13 @@ def test_check_accounts_cli_filters_and_skips_locked(monkeypatch, settings, caps
             connects.append(acc.email) or (_ for _ in ()).throw(OSError("refused"))
         ),
     )
-    assert cli.main(["check-accounts", "--email", "B@x.cz", "nobody@x.cz"]) == 0
+    assert cli.main(["check-accounts", "--email", "B@x.example.com", "nobody@x.example.com"]) == 0
     captured = capsys.readouterr()
-    assert captured.out.startswith("b@x.cz\tneeds_reconnect\t")
-    assert "a@x.cz" not in captured.out and "unknown account: nobody@x.cz" in captured.err
+    assert captured.out.startswith("b@x.example.com\tneeds_reconnect\t")
+    assert (
+        "a@x.example.com" not in captured.out
+        and "unknown account: nobody@x.example.com" in captured.err
+    )
     assert connects == []  # the breaker holds: no login attempt for needs_reconnect
 
 

@@ -119,7 +119,7 @@ async def test_capability_checks(setup):
     with pytest.raises(PimError, match="unavailable"):
         await svc.list_calendars("g@gmail.com")
     with pytest.raises(PimError, match="unknown"):
-        await svc.list_calendars("nobody@x.cz")
+        await svc.list_calendars("nobody@x.example.com")
 
 
 async def test_create_event_routes_to_account(setup):

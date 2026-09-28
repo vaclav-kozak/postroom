@@ -48,7 +48,7 @@ CARDS = "".join(
         f"BEGIN:VCARD\r\nVERSION:3.0\r\nFN:{fn}\r\nEMAIL:{email}\r\nEND:VCARD\r\n"
         "</C:address-data>",
     )
-    for uid, fn, email in [("a", "Jan Novák", "jan@example.com"), ("b", "Eva", "eva@x.cz")]
+    for uid, fn, email in [("a", "Jan Novák", "jan@example.com"), ("b", "Eva", "eva@x.example.com")]
 )
 
 

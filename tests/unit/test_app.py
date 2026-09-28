@@ -81,14 +81,16 @@ async def test_build_mcp_registers_annotated_mail_tools(settings):
 async def test_unknown_account_is_clean_tool_error(settings):
     mcp = build_mcp(build_services(settings))
     async with Client(mcp) as c:
-        res = await c.call_tool("list_folders", {"account": "nobody@x.cz"}, raise_on_error=False)
-    assert res.is_error and res.content[0].text == "unknown account: nobody@x.cz"
+        res = await c.call_tool(
+            "list_folders", {"account": "nobody@x.example.com"}, raise_on_error=False
+        )
+    assert res.is_error and res.content[0].text == "unknown account: nobody@x.example.com"
 
 
 async def test_blocked_account_is_not_contacted(settings):
     services = build_services(settings)
     services.repo.upsert(
-        email="a@x.cz",
+        email="a@x.example.com",
         provider=Provider.IMAP,
         imap_host="127.0.0.1",
         imap_port=1,
@@ -99,7 +101,9 @@ async def test_blocked_account_is_not_contacted(settings):
     mcp = build_mcp(services)
     async with Client(mcp) as c:
         res = await c.call_tool(
-            "get_email", {"account": "a@x.cz", "folder": "inbox", "uid": 1}, raise_on_error=False
+            "get_email",
+            {"account": "a@x.example.com", "folder": "inbox", "uid": 1},
+            raise_on_error=False,
         )
     assert res.is_error and "needs reconnect" in res.content[0].text
     assert "pw" not in res.content[0].text
@@ -123,7 +127,7 @@ def test_time_zone_setting_reaches_pim_tools_and_instructions(settings):
 async def test_blocked_account_pim_call_is_not_contacted(settings):
     services = build_services(settings)
     services.repo.upsert(
-        email="a@x.cz",
+        email="a@x.example.com",
         provider=Provider.IMAP,
         imap_host="127.0.0.1",
         imap_port=1,
@@ -136,7 +140,9 @@ async def test_blocked_account_pim_call_is_not_contacted(settings):
     services.pim.backend_factory = lambda account, capability: built.append(account)
     mcp = build_mcp(services)
     async with Client(mcp) as c:
-        res = await c.call_tool("list_calendars", {"account": "a@x.cz"}, raise_on_error=False)
+        res = await c.call_tool(
+            "list_calendars", {"account": "a@x.example.com"}, raise_on_error=False
+        )
     assert res.is_error and res.content[0].text == "account unavailable: needs_reconnect"
     assert built == []
 

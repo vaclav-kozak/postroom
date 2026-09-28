@@ -28,7 +28,7 @@ async def http(settings):
     settings.admin_password_hash_b64 = base64.b64encode(hash_password(PASSWORD).encode()).decode()
     services = build_services(settings)
     services.repo.upsert(
-        email="a@x.cz",
+        email="a@x.example.com",
         provider=Provider.IMAP,
         imap_host="h",
         imap_port=993,

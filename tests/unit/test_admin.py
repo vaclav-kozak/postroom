@@ -76,9 +76,9 @@ async def test_add_account_bad_password_stores_nothing(env):
         "/admin/accounts",
         data={
             "csrf": csrf(page.text),
-            "email": "n@x.cz",
+            "email": "n@x.example.com",
             "display_name": "N",
-            "imap_host": "imap.x.cz",
+            "imap_host": "imap.x.example.com",
             "imap_port": "993",
             "imap_security": "ssl",
             "imap_username": "",
@@ -88,7 +88,7 @@ async def test_add_account_bad_password_stores_nothing(env):
         },
     )
     assert r.status_code == 200 and "AUTHENTICATIONFAILED" in r.text
-    assert services.repo.get("n@x.cz") is None
+    assert services.repo.get("n@x.example.com") is None
 
 
 def _account_form(csrf_token: str, email: str, **extra: str) -> dict[str, str]:
@@ -159,7 +159,7 @@ async def test_api_key_shown_once(env):
 async def test_delete_requires_confirmation(env):
     c, services, _ = env
     a = services.repo.upsert(
-        email="d@x.cz",
+        email="d@x.example.com",
         provider=Provider.IMAP,
         imap_host="h",
         imap_port=993,
@@ -170,11 +170,12 @@ async def test_delete_requires_confirmation(env):
     r = await c.post(
         f"/admin/accounts/{a.id}/delete", data={"csrf": csrf(page.text), "confirm": "nope"}
     )
-    assert "confirm_mismatch" in r.headers["location"] and services.repo.get("d@x.cz")
+    assert "confirm_mismatch" in r.headers["location"] and services.repo.get("d@x.example.com")
     r = await c.post(
-        f"/admin/accounts/{a.id}/delete", data={"csrf": csrf(page.text), "confirm": "d@x.cz"}
+        f"/admin/accounts/{a.id}/delete",
+        data={"csrf": csrf(page.text), "confirm": "d@x.example.com"},
     )
-    assert services.repo.get("d@x.cz") is None
+    assert services.repo.get("d@x.example.com") is None
 
 
 async def test_flash_messages_are_not_reflected(env):

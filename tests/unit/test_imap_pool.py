@@ -38,14 +38,14 @@ class FakeConnector:
 @pytest.fixture
 def acct(repo):
     repo.upsert(
-        email="a@x.cz",
+        email="a@x.example.com",
         provider=Provider.IMAP,
         imap_host="h",
         imap_port=993,
         imap_security="ssl",
         secret="pw",
     )
-    return "a@x.cz"
+    return "a@x.example.com"
 
 
 def test_connects_and_marks_connected(repo, acct):
@@ -115,7 +115,7 @@ def test_disabled_and_unknown(repo, acct):
     repo.set_enabled(acct, False)
     with pytest.raises(AccountUnavailable), pool.session(acct):
         pass
-    with pytest.raises(ImapError), pool.session("nobody@x.cz"):
+    with pytest.raises(ImapError), pool.session("nobody@x.example.com"):
         pass
 
 
@@ -246,7 +246,7 @@ def test_breaker_race_blocks_second_caller_after_lock(repo, acct):
 
 def test_starttls_failure_closes_socket_and_sets_error(monkeypatch, repo):
     repo.upsert(
-        email="s@x.cz",
+        email="s@x.example.com",
         provider=Provider.IMAP,
         imap_host="h",
         imap_port=143,
@@ -269,12 +269,12 @@ def test_starttls_failure_closes_socket_and_sets_error(monkeypatch, repo):
     monkeypatch.setattr("postroom.mail.imap.SafeIMAPClient", FakeStarttlsFailClient)
 
     pool = ImapPool(repo, ImapConnector())
-    with pytest.raises(ImapError), pool.session("s@x.cz"):
+    with pytest.raises(ImapError), pool.session("s@x.example.com"):
         pass
 
     assert len(created) == 1
     assert created[0].shutdown_called is True
-    assert repo.get("s@x.cz").status == AccountStatus.ERROR
+    assert repo.get("s@x.example.com").status == AccountStatus.ERROR
 
 
 @pytest.fixture

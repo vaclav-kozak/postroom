@@ -15,7 +15,7 @@ INSECURE = [
     "http://mail.example.com/SOGo/dav/a@example.com/",
     "HTTP://mail.example.com/",
     "http://127.0.0.2/",
-    "http://localhost.evil.cz/",
+    "http://localhost.evil.example/",
     "ftp://mail.example.com/",
     "mail.example.com/SOGo/dav/",
     "https:///no-host",

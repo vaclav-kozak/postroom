@@ -13,10 +13,10 @@ def env(subject, sender):
     return Envelope(
         datetime(2026, 9, 25),  # noqa: DTZ001 -- envelope date is unused by the code under test
         subject.encode(),
-        (Address(None, None, sender.encode(), b"x.cz"),),
+        (Address(None, None, sender.encode(), b"x.example.com"),),
         None,
         None,
-        (Address(None, None, b"me", b"x.cz"),),
+        (Address(None, None, b"me", b"x.example.com"),),
         None,
         None,
         None,
@@ -76,7 +76,7 @@ class StubPool:
 
 @pytest.fixture
 def two_accounts(repo):
-    for e in ("a@x.cz", "b@x.cz"):
+    for e in ("a@x.example.com", "b@x.example.com"):
         repo.upsert(
             email=e,
             provider=Provider.IMAP,
@@ -95,40 +95,49 @@ async def test_search_merges_and_reports_errors(repo, two_accounts):
     t = lambda h: datetime(2026, 9, 25, h, tzinfo=UTC)
     pool = StubPool(
         {
-            "a@x.cz": Fake({1: (t(8), "old a", "p", True), 2: (t(12), "new a", "q", False)}),
-            "b@x.cz": Fake({7: (t(10), "mid b", "r", True)}),
+            "a@x.example.com": Fake(
+                {1: (t(8), "old a", "p", True), 2: (t(12), "new a", "q", False)}
+            ),
+            "b@x.example.com": Fake({7: (t(10), "mid b", "r", True)}),
         }
     )
     svc = MailService(repo, pool)
     res = await svc.search(None, None, SearchCriteria(), limit=10)
     assert [m.subject for m in res.results] == ["new a", "mid b", "old a"]
-    assert res.results[0].seen is False and res.results[0].account == "a@x.cz"
+    assert res.results[0].seen is False and res.results[0].account == "a@x.example.com"
     assert [e.account for e in res.errors] == ["g@gmail.com"]
 
 
 async def test_search_limit_and_offset(repo, two_accounts):
     t = lambda h: datetime(2026, 9, 25, h, tzinfo=UTC)
     pool = StubPool(
-        {"a@x.cz": Fake({i: (t(i), f"s{i}", "p", True) for i in range(1, 6)}), "b@x.cz": Fake({})}
+        {
+            "a@x.example.com": Fake({i: (t(i), f"s{i}", "p", True) for i in range(1, 6)}),
+            "b@x.example.com": Fake({}),
+        }
     )
     res = await MailService(repo, pool).search(
-        ["a@x.cz"], "inbox", SearchCriteria(), limit=2, offset=1
+        ["a@x.example.com"], "inbox", SearchCriteria(), limit=2, offset=1
     )
     assert [m.subject for m in res.results] == ["s4", "s3"]
 
 
 async def test_one_account_failure_does_not_fail_call(repo, two_accounts):
     t = datetime(2026, 9, 25, tzinfo=UTC)
-    pool = StubPool({"a@x.cz": Fake({1: (t, "ok", "p", True)}), "b@x.cz": OSError("boom")})
-    res = await MailService(repo, pool).search(["a@x.cz", "b@x.cz"], None, SearchCriteria())
-    assert len(res.results) == 1 and res.errors[0].account == "b@x.cz"
+    pool = StubPool(
+        {"a@x.example.com": Fake({1: (t, "ok", "p", True)}), "b@x.example.com": OSError("boom")}
+    )
+    res = await MailService(repo, pool).search(
+        ["a@x.example.com", "b@x.example.com"], None, SearchCriteria()
+    )
+    assert len(res.results) == 1 and res.errors[0].account == "b@x.example.com"
 
 
 async def test_create_draft_appends_to_drafts(repo, two_accounts):
     fake = Fake({})
-    res = await MailService(repo, StubPool({"a@x.cz": fake, "b@x.cz": Fake({})})).create_draft(
-        "a@x.cz", to=["z@y.cz"], subject="Hi", body="Body"
-    )
+    res = await MailService(
+        repo, StubPool({"a@x.example.com": fake, "b@x.example.com": Fake({})})
+    ).create_draft("a@x.example.com", to=["z@y.example.org"], subject="Hi", body="Body")
     folder, raw, flags = fake.appended[0]
     assert folder == "Drafts" and flags == (b"\\Draft",) and b"Subject: Hi" in raw
     assert res.folder == "Drafts" and res.message_id.startswith("<")
@@ -136,8 +145,8 @@ async def test_create_draft_appends_to_drafts(repo, two_accounts):
 
 async def test_create_draft_requires_recipient(repo, two_accounts):
     with pytest.raises(ValueError):
-        await MailService(repo, StubPool({"a@x.cz": Fake({})})).create_draft(
-            "a@x.cz", to=[], subject="x", body="y"
+        await MailService(repo, StubPool({"a@x.example.com": Fake({})})).create_draft(
+            "a@x.example.com", to=[], subject="x", body="y"
         )
 
 
@@ -158,17 +167,21 @@ async def test_get_message_too_large_never_fetches_body(repo, two_accounts):
             return out
 
     fake = HugeSizeFake({1: (t, "big", "p", True)})
-    svc = MailService(repo, StubPool({"a@x.cz": fake, "b@x.cz": Fake({})}))
-    detail = await svc.get_message("a@x.cz", "inbox", 1)
+    svc = MailService(repo, StubPool({"a@x.example.com": fake, "b@x.example.com": Fake({})}))
+    detail = await svc.get_message("a@x.example.com", "inbox", 1)
     assert detail.message.body_text == ""  # the fake serves no section data
 
 
 async def test_account_error_message_never_empty(repo, two_accounts):
     # A timeout (asyncio.wait_for) stringifies to "", which told the model nothing.
     t = datetime(2026, 9, 25, tzinfo=UTC)
-    pool = StubPool({"a@x.cz": Fake({1: (t, "ok", "p", True)}), "b@x.cz": TimeoutError()})
-    res = await MailService(repo, pool).search(["a@x.cz", "b@x.cz"], None, SearchCriteria())
-    assert [(e.account, e.error) for e in res.errors] == [("b@x.cz", "TimeoutError")]
+    pool = StubPool(
+        {"a@x.example.com": Fake({1: (t, "ok", "p", True)}), "b@x.example.com": TimeoutError()}
+    )
+    res = await MailService(repo, pool).search(
+        ["a@x.example.com", "b@x.example.com"], None, SearchCriteria()
+    )
+    assert [(e.account, e.error) for e in res.errors] == [("b@x.example.com", "TimeoutError")]
 
 
 async def test_create_draft_uses_the_special_use_drafts_folder(repo, two_accounts):
@@ -177,6 +190,6 @@ async def test_create_draft_uses_the_special_use_drafts_folder(repo, two_account
             return [((), b"/", "INBOX"), ((), b"/", "Drafts"), ((b"\\Drafts",), b"/", "Koncepty")]
 
     fake = TwoDrafts({})
-    svc = MailService(repo, StubPool({"a@x.cz": fake, "b@x.cz": Fake({})}))
-    res = await svc.create_draft("a@x.cz", to=["z@y.cz"], subject="S", body="B")
+    svc = MailService(repo, StubPool({"a@x.example.com": fake, "b@x.example.com": Fake({})}))
+    res = await svc.create_draft("a@x.example.com", to=["z@y.example.org"], subject="S", body="B")
     assert res.folder == "Koncepty" and fake.appended[0][0] == "Koncepty"

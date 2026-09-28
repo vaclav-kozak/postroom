@@ -71,7 +71,7 @@ def _account(repo, email, base):
 
 async def test_parallel_pim_calls_with_a_wrong_password_make_one_failed_login(repo, dav_401):
     base, credentialed = dav_401
-    _account(repo, "u@x.cz", base)
+    _account(repo, "u@x.example.com", base)
     pim = PimService(repo, None)
     now = datetime.now(UTC)
     week = now + timedelta(days=7)
@@ -81,13 +81,13 @@ async def test_parallel_pim_calls_with_a_wrong_password_make_one_failed_login(re
         pim.list_task_lists(None),
         pim.list_tasks(None, None, False),
         pim.search_contacts("jan", None, 20),
-        pim.list_events("u@x.cz", None, now, week, "x"),
-        pim.search_contacts("petr", "u@x.cz", 5),
-        pim.list_calendars("u@x.cz"),
+        pim.list_events("u@x.example.com", None, now, week, "x"),
+        pim.search_contacts("petr", "u@x.example.com", 5),
+        pim.list_calendars("u@x.example.com"),
     ]
     results = await asyncio.gather(*calls, return_exceptions=True)
     assert len(credentialed) == 1, credentialed
-    assert repo.get("u@x.cz").status == AccountStatus.NEEDS_RECONNECT
+    assert repo.get("u@x.example.com").status == AccountStatus.NEEDS_RECONNECT
     # Every call failed; none of them crashed with anything but a clean PimError.
     for res in results:
         if isinstance(res, tuple):
@@ -100,7 +100,7 @@ async def test_parallel_pim_calls_with_a_wrong_password_make_one_failed_login(re
 async def test_accounts_on_one_dav_host_each_fail_once(repo, dav_401):
     base, credentialed = dav_401
     for i in range(3):
-        _account(repo, f"u{i}@x.cz", base)
+        _account(repo, f"u{i}@x.example.com", base)
     pim = PimService(repo, None)
     now = datetime.now(UTC)
     await asyncio.gather(
@@ -154,7 +154,7 @@ async def test_queued_call_fails_fast_once_the_breaker_trips(repo):
 async def test_imap_connect_and_dav_call_share_the_account_lock(repo, dav_401):
     """A wrong password seen by IMAP and CalDAV at once still costs a single failure."""
     base, credentialed = dav_401
-    _account(repo, "u@x.cz", base)
+    _account(repo, "u@x.example.com", base)
     imap_logins = []
 
     class FailingConnector:
@@ -169,20 +169,20 @@ async def test_imap_connect_and_dav_call_share_the_account_lock(repo, dav_401):
 
     def mail():
         try:
-            with pool.session("u@x.cz"):
+            with pool.session("u@x.example.com"):
                 pass
         except ImapError:
             pass
 
     await asyncio.gather(
         asyncio.to_thread(mail),
-        pim.list_calendars("u@x.cz"),
+        pim.list_calendars("u@x.example.com"),
         asyncio.to_thread(mail),
-        pim.search_contacts("jan", "u@x.cz", 5),
+        pim.search_contacts("jan", "u@x.example.com", 5),
         return_exceptions=True,
     )
     assert len(imap_logins) + len(credentialed) == 1, (imap_logins, credentialed)
-    assert repo.get("u@x.cz").status == AccountStatus.NEEDS_RECONNECT
+    assert repo.get("u@x.example.com").status == AccountStatus.NEEDS_RECONNECT
 
 
 async def test_abandoned_call_does_not_run_after_its_timeout(repo):

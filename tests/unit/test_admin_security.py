@@ -96,10 +96,10 @@ def services(app):
 @pytest.fixture
 def imap_account(services):
     return services.repo.upsert(
-        email="d@x.cz",
+        email="d@x.example.com",
         provider=Provider.IMAP,
         display_name="D",
-        imap_host="imap.x.cz",
+        imap_host="imap.x.example.com",
         imap_port=993,
         imap_security="ssl",
         secret="good",
@@ -109,9 +109,9 @@ def imap_account(services):
 
 def form(**over):
     data = {
-        "email": "n@x.cz",
+        "email": "n@x.example.com",
         "display_name": "N",
-        "imap_host": "imap.x.cz",
+        "imap_host": "imap.x.example.com",
         "imap_port": "993",
         "imap_security": "ssl",
         "imap_username": "",
@@ -159,14 +159,14 @@ async def test_every_admin_post_requires_owner_and_changes_nothing(
     for route in POST_ROUTES:
         r = await anon.post(
             route.format(id=imap_account.id),
-            data={**form(), "confirm": "d@x.cz", "name": "evil", "csrf": "x"},
+            data={**form(), "confirm": "d@x.example.com", "name": "evil", "csrf": "x"},
         )
         assert r.status_code in (302, 401, 403), route
         if r.status_code == 302:
             assert r.headers["location"].startswith("/login?next="), route
-    a = services.repo.get("d@x.cz")
-    assert a is not None and a.enabled and services.repo.get_secret("d@x.cz") == "good"
-    assert services.repo.get("n@x.cz") is None
+    a = services.repo.get("d@x.example.com")
+    assert a is not None and a.enabled and services.repo.get_secret("d@x.example.com") == "good"
+    assert services.repo.get("n@x.example.com") is None
     assert [k.name for k in services.provider.list_api_keys()] == ["k"]
     assert await services.provider.load_access_token(key) is not None
     assert app.state.attempts == []
@@ -176,14 +176,14 @@ async def test_every_admin_post_requires_owner_and_changes_nothing(
 async def test_every_admin_post_requires_csrf(owner, app, services, imap_account, token):
     key = services.provider.create_api_key("k")
     for route in POST_ROUTES:
-        data = {**form(), "confirm": "d@x.cz", "name": "evil"}
+        data = {**form(), "confirm": "d@x.example.com", "name": "evil"}
         if token is not None:
             data["csrf"] = token
         r = await owner.post(route.format(id=imap_account.id), data=data)
         assert r.status_code == 403, route
-    a = services.repo.get("d@x.cz")
-    assert a is not None and a.enabled and services.repo.get_secret("d@x.cz") == "good"
-    assert services.repo.get("n@x.cz") is None
+    a = services.repo.get("d@x.example.com")
+    assert a is not None and a.enabled and services.repo.get_secret("d@x.example.com") == "good"
+    assert services.repo.get("n@x.example.com") is None
     assert [k.name for k in services.provider.list_api_keys()] == ["k"]
     assert await services.provider.load_access_token(key) is not None
     assert app.state.attempts == []
@@ -224,16 +224,25 @@ async def test_add_account_validation_makes_no_login_attempt(owner, app, service
 def test_dav_urls_must_be_https_except_loopback():
     from postroom.web.admin import AccountForm
 
-    base = {"email": "a@x.cz", "imap_host": "imap.x.cz", "imap_port": "993", "imap_security": "ssl"}
+    base = {
+        "email": "a@x.example.com",
+        "imap_host": "imap.x.example.com",
+        "imap_port": "993",
+        "imap_security": "ssl",
+    }
     for url in (
-        "https://dav.x.cz/",
+        "https://dav.x.example.com/",
         "http://localhost:5232/",
         "http://127.0.0.1/",
         "http://[::1]/",
     ):
         f = AccountForm.from_form({**base, "caldav_url": url, "carddav_url": url})
         assert f.validate("pw", True) is None, url
-    for url in ("http://dav.x.cz/", "http://localhost.evil.example/", "ftp://dav.x.cz/"):
+    for url in (
+        "http://dav.x.example.com/",
+        "http://localhost.evil.example/",
+        "ftp://dav.x.example.com/",
+    ):
         assert AccountForm.from_form({**base, "caldav_url": url}).validate("pw", True), url
 
 
@@ -241,12 +250,12 @@ async def test_failed_add_does_not_echo_password(owner, services):
     pw = "Unique-Pw-8d7c6b"
     r = await owner.post("/admin/accounts", data={**form(password=pw), "csrf": owner.token})
     assert r.status_code == 200 and pw not in r.text
-    assert services.repo.get("n@x.cz") is None
+    assert services.repo.get("n@x.example.com") is None
 
 
 async def test_add_existing_email_goes_to_edit(owner, app, imap_account):
     r = await owner.post(
-        "/admin/accounts", data={**form(email="D@x.cz", password="x"), "csrf": owner.token}
+        "/admin/accounts", data={**form(email="D@x.example.com", password="x"), "csrf": owner.token}
     )
     assert r.status_code == 303
     assert r.headers["location"] == f"/admin/accounts/{imap_account.id}/edit"
@@ -258,39 +267,45 @@ async def test_edit_keeps_secret_when_password_empty(owner, app, services, imap_
     assert page.status_code == 200 and "good" not in page.text  # secret never rendered
     r = await owner.post(
         f"/admin/accounts/{imap_account.id}",
-        data={**form(email="d@x.cz", display_name="New", password=""), "csrf": owner.token},
+        data={
+            **form(email="d@x.example.com", display_name="New", password=""),
+            "csrf": owner.token,
+        },
     )
     assert r.status_code == 303 and "account_updated" in r.headers["location"]
-    assert app.state.attempts == [("d@x.cz", "good")]
-    a = services.repo.get("d@x.cz")
-    assert a.display_name == "New" and services.repo.get_secret("d@x.cz") == "good"
+    assert app.state.attempts == [("d@x.example.com", "good")]
+    a = services.repo.get("d@x.example.com")
+    assert a.display_name == "New" and services.repo.get_secret("d@x.example.com") == "good"
 
 
 async def test_edit_with_bad_password_changes_nothing(owner, services, imap_account):
     r = await owner.post(
         f"/admin/accounts/{imap_account.id}",
-        data={**form(email="d@x.cz", display_name="New", password="bad"), "csrf": owner.token},
+        data={
+            **form(email="d@x.example.com", display_name="New", password="bad"),
+            "csrf": owner.token,
+        },
     )
     assert r.status_code == 200 and "AUTHENTICATIONFAILED" in r.text
-    a = services.repo.get("d@x.cz")
-    assert a.display_name == "D" and services.repo.get_secret("d@x.cz") == "good"
+    a = services.repo.get("d@x.example.com")
+    assert a.display_name == "D" and services.repo.get_secret("d@x.example.com") == "good"
 
 
 async def test_edit_cannot_rename_account(owner, services, imap_account):
     r = await owner.post(
         f"/admin/accounts/{imap_account.id}",
-        data={**form(email="other@x.cz", password=""), "csrf": owner.token},
+        data={**form(email="other@x.example.com", password=""), "csrf": owner.token},
     )
     assert r.status_code == 303
-    assert services.repo.get("other@x.cz") is None and services.repo.get("d@x.cz")
+    assert services.repo.get("other@x.example.com") is None and services.repo.get("d@x.example.com")
 
 
 async def test_toggle_test_and_unknown_ids(owner, services, imap_account):
     r = await owner.post(f"/admin/accounts/{imap_account.id}/toggle", data={"csrf": owner.token})
     assert "account_toggled" in r.headers["location"]
-    assert services.repo.get("d@x.cz").enabled is False
+    assert services.repo.get("d@x.example.com").enabled is False
     await owner.post(f"/admin/accounts/{imap_account.id}/toggle", data={"csrf": owner.token})
-    assert services.repo.get("d@x.cz").enabled is True
+    assert services.repo.get("d@x.example.com").enabled is True
     r = await owner.post(f"/admin/accounts/{imap_account.id}/test", data={"csrf": owner.token})
     assert "check_ok" in r.headers["location"]
     for route in ("/admin/accounts/999/test", "/admin/accounts/999/toggle"):
@@ -301,7 +316,7 @@ async def test_toggle_test_and_unknown_ids(owner, services, imap_account):
 
 async def test_check_failed_message(owner, services):
     a = services.repo.upsert(
-        email="b@x.cz",
+        email="b@x.example.com",
         provider=Provider.IMAP,
         imap_host="h",
         imap_port=993,
@@ -310,7 +325,7 @@ async def test_check_failed_message(owner, services):
     )
     r = await owner.post(f"/admin/accounts/{a.id}/test", data={"csrf": owner.token})
     assert "check_failed" in r.headers["location"]
-    assert services.repo.get("b@x.cz").status == AccountStatus.NEEDS_RECONNECT
+    assert services.repo.get("b@x.example.com").status == AccountStatus.NEEDS_RECONNECT
 
 
 @respx.mock
@@ -327,14 +342,14 @@ async def test_delete_google_account_revokes_token(owner, services):
 
 async def test_admin_output_is_escaped(owner, services):
     services.repo.upsert(
-        email="x@x.cz",
+        email="x@x.example.com",
         provider=Provider.IMAP,
         display_name="<script>alert('name')</script>",
         imap_host="h",
         imap_port=993,
         imap_security="ssl",
     )
-    services.repo.set_status("x@x.cz", AccountStatus.ERROR, "<img src=x onerror=alert(1)>")
+    services.repo.set_status("x@x.example.com", AccountStatus.ERROR, "<img src=x onerror=alert(1)>")
     services.provider.create_api_key("<b>key</b>")
     reg = await owner.post(
         "/register",
@@ -518,13 +533,13 @@ async def test_edit_to_a_new_server_needs_the_password_again(
 ):
     r = await owner.post(
         f"/admin/accounts/{imap_account.id}",
-        data={**form(email="d@x.cz", password=""), **change, "csrf": owner.token},
+        data={**form(email="d@x.example.com", password=""), **change, "csrf": owner.token},
     )
     assert r.status_code == 400
     assert "Re-enter the password when changing a server address." in r.text
     assert app.state.attempts == []  # the stored password went nowhere
-    a = services.repo.get("d@x.cz")
-    assert a.imap_host == "imap.x.cz" and a.smtp_host is None and a.caldav_url is None
+    a = services.repo.get("d@x.example.com")
+    assert a.imap_host == "imap.x.example.com" and a.smtp_host is None and a.caldav_url is None
 
 
 async def test_edit_to_a_new_server_with_the_password_typed_is_saved(
@@ -532,34 +547,37 @@ async def test_edit_to_a_new_server_with_the_password_typed_is_saved(
 ):
     r = await owner.post(
         f"/admin/accounts/{imap_account.id}",
-        data={**form(email="d@x.cz", imap_host="imap2.x.cz"), "csrf": owner.token},
+        data={
+            **form(email="d@x.example.com", imap_host="imap2.x.example.com"),
+            "csrf": owner.token,
+        },
     )
     assert r.status_code == 303 and "account_updated" in r.headers["location"]
-    assert app.state.attempts == [("d@x.cz", "good")]
-    assert services.repo.get("d@x.cz").imap_host == "imap2.x.cz"
+    assert app.state.attempts == [("d@x.example.com", "good")]
+    assert services.repo.get("d@x.example.com").imap_host == "imap2.x.example.com"
 
 
 async def test_edit_keeps_the_stored_password_for_the_same_servers(
     owner, app, services, imap_account
 ):
     services.repo.upsert(
-        email="d@x.cz",
+        email="d@x.example.com",
         provider=Provider.IMAP,
-        imap_host="imap.x.cz",
+        imap_host="imap.x.example.com",
         imap_port=993,
         imap_security="ssl",
-        caldav_url="https://dav.x.cz/cal/",
-        carddav_url="https://dav.x.cz/card/",
+        caldav_url="https://dav.x.example.com/cal/",
+        carddav_url="https://dav.x.example.com/card/",
     )
     data = form(
-        email="d@x.cz",
+        email="d@x.example.com",
         password="",
-        imap_host="IMAP.x.cz",
+        imap_host="IMAP.x.example.com",
         imap_port="143",
         imap_security="starttls",
-        caldav_url="https://DAV.x.cz/other/path/",
+        caldav_url="https://DAV.x.example.com/other/path/",
         carddav_url="",  # removing a server is fine
     )
     r = await owner.post(f"/admin/accounts/{imap_account.id}", data={**data, "csrf": owner.token})
     assert r.status_code == 303, r.text
-    assert app.state.attempts == [("d@x.cz", "good")]
+    assert app.state.attempts == [("d@x.example.com", "good")]

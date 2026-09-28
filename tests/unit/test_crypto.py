@@ -8,11 +8,11 @@ from postroom import crypto
 
 def test_secretbox_roundtrip_and_aad():
     box = crypto.SecretBox(crypto.generate_key())
-    blob = box.encrypt("hunter2", aad="account:a@b.cz")
+    blob = box.encrypt("hunter2", aad="account:a@b.example.net")
     assert b"hunter2" not in blob
-    assert box.decrypt(blob, aad="account:a@b.cz") == "hunter2"
+    assert box.decrypt(blob, aad="account:a@b.example.net") == "hunter2"
     with pytest.raises(crypto.SecretError):
-        box.decrypt(blob, aad="account:other@b.cz")
+        box.decrypt(blob, aad="account:other@b.example.net")
 
 
 def test_secretbox_rejects_bad_key():

@@ -28,9 +28,9 @@ class Conn:
 @pytest.fixture
 def accounts(repo):
     for e, st in [
-        ("ok@x.cz", AccountStatus.PENDING),
-        ("bad@x.cz", AccountStatus.CONNECTED),
-        ("locked@x.cz", AccountStatus.NEEDS_RECONNECT),
+        ("ok@x.example.com", AccountStatus.PENDING),
+        ("bad@x.example.com", AccountStatus.CONNECTED),
+        ("locked@x.example.com", AccountStatus.NEEDS_RECONNECT),
     ]:
         repo.upsert(
             email=e,
@@ -42,36 +42,41 @@ def accounts(repo):
             status=st,
         )
     repo.upsert(
-        email="off@x.cz",
+        email="off@x.example.com",
         provider=Provider.IMAP,
         imap_host="h",
         imap_port=993,
         imap_security="ssl",
         secret="p",
     )
-    repo.set_enabled("off@x.cz", False)
+    repo.set_enabled("off@x.example.com", False)
 
 
 async def test_check_all_respects_breaker(repo, accounts):
-    conn = Conn(bad={"bad@x.cz"})
+    conn = Conn(bad={"bad@x.example.com"})
     res = await AccountChecker(repo, ImapPool(repo, conn)).check_all()
-    assert res == {"ok@x.cz": AccountStatus.CONNECTED, "bad@x.cz": AccountStatus.NEEDS_RECONNECT}
-    assert sorted(conn.calls) == ["bad@x.cz", "ok@x.cz"]
+    assert res == {
+        "ok@x.example.com": AccountStatus.CONNECTED,
+        "bad@x.example.com": AccountStatus.NEEDS_RECONNECT,
+    }
+    assert sorted(conn.calls) == ["bad@x.example.com", "ok@x.example.com"]
     # second run: bad account is now needs_reconnect → not retried
     conn.calls.clear()
     await AccountChecker(repo, ImapPool(repo, conn)).check_all()
-    assert conn.calls == ["ok@x.cz"]
+    assert conn.calls == ["ok@x.example.com"]
 
 
 async def test_manual_check_retries_locked(repo, accounts):
     conn = Conn()
-    st = await AccountChecker(repo, ImapPool(repo, conn)).check_account("locked@x.cz", manual=True)
+    st = await AccountChecker(repo, ImapPool(repo, conn)).check_account(
+        "locked@x.example.com", manual=True
+    )
     assert st == AccountStatus.CONNECTED
 
 
 async def test_error_backoff(repo, accounts):
     now = [5000.0]
-    repo.set_status("ok@x.cz", AccountStatus.ERROR, "timeout")
+    repo.set_status("ok@x.example.com", AccountStatus.ERROR, "timeout")
     conn = Conn()
     checker = AccountChecker(repo, ImapPool(repo, conn), clock=lambda: now[0])
     # last_check_at was just set by set_status (real time) → within 300 s of real now
@@ -79,10 +84,10 @@ async def test_error_backoff(repo, accounts):
 
     now[0] = time.time() + 10
     await checker.check_all()
-    assert "ok@x.cz" not in conn.calls
+    assert "ok@x.example.com" not in conn.calls
     now[0] = time.time() + 400
     await checker.check_all()
-    assert "ok@x.cz" in conn.calls
+    assert "ok@x.example.com" in conn.calls
 
 
 # --- maintenance loop and lifespan wiring (beyond the brief) -------------------------------
@@ -142,7 +147,7 @@ async def test_maintenance_schedule(repo, accounts):
     await _run_ticks(checker, provider, 0.03, 7)
     assert checker.ticks_seen >= 7
     assert checker.checks == provider.purges == len(range(0, checker.ticks_seen, 3))
-    assert repo.get("ok@x.cz").status == AccountStatus.CONNECTED
+    assert repo.get("ok@x.example.com").status == AccountStatus.CONNECTED
 
 
 async def test_maintenance_survives_errors(repo, accounts):

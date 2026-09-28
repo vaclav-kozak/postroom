@@ -13,13 +13,13 @@ from postroom.mail import models, parse
 
 def _mixed() -> bytes:
     m = EmailMessage()
-    m["From"] = "=?utf-8?q?Tom=C3=A1=C5=A1?= <v@x.cz>"
-    m["To"] = "a@x.cz, B <b@y.cz>"
-    m["Cc"] = "c@z.cz"
+    m["From"] = "=?utf-8?q?Tom=C3=A1=C5=A1?= <v@x.example.com>"
+    m["To"] = "a@x.example.com, B <b@y.example.org>"
+    m["Cc"] = "c@z.example.net"
     m["Subject"] = "=?utf-8?q?P=C5=99=C3=ADloha?="
-    m["Message-ID"] = "<m1@x.cz>"
-    m["In-Reply-To"] = "<m0@x.cz>"
-    m["References"] = "<a@x.cz> <m0@x.cz>"
+    m["Message-ID"] = "<m1@x.example.com>"
+    m["In-Reply-To"] = "<m0@x.example.com>"
+    m["References"] = "<a@x.example.com> <m0@x.example.com>"
     m["Date"] = "Thu, 25 Sep 2026 10:00:00 +0200"
     m.set_content("Plain body here, long enough to be preferred.")
     m.add_alternative("<p>HTML <b>body</b></p>", subtype="html")
@@ -33,10 +33,10 @@ def _mixed() -> bytes:
 def test_parse_headers_and_body():
     p = parse.parse_message(_mixed())
     assert p.subject == "Příloha"
-    assert p.from_ == "Tomáš <v@x.cz>"
-    assert p.to == ["a@x.cz", "B <b@y.cz>"] and p.cc == ["c@z.cz"]
-    assert p.message_id == "<m1@x.cz>" and p.in_reply_to == "<m0@x.cz>"
-    assert p.references == ["<a@x.cz>", "<m0@x.cz>"]
+    assert p.from_ == "Tomáš <v@x.example.com>"
+    assert p.to == ["a@x.example.com", "B <b@y.example.org>"] and p.cc == ["c@z.example.net"]
+    assert p.message_id == "<m1@x.example.com>" and p.in_reply_to == "<m0@x.example.com>"
+    assert p.references == ["<a@x.example.com>", "<m0@x.example.com>"]
     assert p.date.startswith("2026-09-25T10:00:00")
     assert p.body_source == "plain" and "Plain body" in p.body_text
     assert [(a.index, a.filename, a.content_type) for a in p.attachments] == [
@@ -50,12 +50,14 @@ def test_html_only_is_converted():
     m["Subject"] = "x"
     m.set_content(
         "<html><head><style>p{}</style><script>alert(1)</script></head>"
-        "<body><h1>Title</h1><p>Hello <a href='https://e.cz'>link</a></p></body></html>",
+        "<body><h1>Title</h1><p>Hello <a href='https://e.example.org'>link</a></p></body></html>",
         subtype="html",
     )
     p = parse.parse_message(m.as_bytes())
     assert p.body_source == "html"
-    assert "Title" in p.body_text and "Hello" in p.body_text and "https://e.cz" in p.body_text
+    assert (
+        "Title" in p.body_text and "Hello" in p.body_text and "https://e.example.org" in p.body_text
+    )
     assert "alert(1)" not in p.body_text and "p{}" not in p.body_text
 
 
@@ -106,10 +108,10 @@ def test_format_address_quotes_names_with_specials():
 
 def test_format_addresses_and_decode():
     addrs = (
-        Address(b"=?utf-8?q?Tom=C3=A1=C5=A1?=", None, b"v", b"x.cz"),
-        Address(None, None, b"a", b"y.cz"),
+        Address(b"=?utf-8?q?Tom=C3=A1=C5=A1?=", None, b"v", b"x.example.com"),
+        Address(None, None, b"a", b"y.example.org"),
     )
-    assert parse.format_addresses(addrs) == ["Tomáš <v@x.cz>", "a@y.cz"]
+    assert parse.format_addresses(addrs) == ["Tomáš <v@x.example.com>", "a@y.example.org"]
     assert parse.format_addresses(None) == []
     assert parse.decode_header_value(b"=?utf-8?b?xb5sdcWlb3XEjWvDvQ==?=") == "žluťoučký"
 
@@ -148,32 +150,35 @@ def test_bodystructure_has_attachment():
 
 def test_build_draft_reply():
     raw, msgid = parse.build_draft(
-        from_addr="me@x.cz",
+        from_addr="me@x.example.com",
         from_name="Tomáš",
-        to=["a@y.cz"],
-        cc=["c@y.cz"],
+        to=["a@y.example.org"],
+        cc=["c@y.example.org"],
         bcc=[],
         subject="Re: Příloha",
         body="Díky!",
         html=False,
-        in_reply_to="<m1@x.cz>",
-        references=["<m0@x.cz>", "<m1@x.cz>"],
+        in_reply_to="<m1@x.example.com>",
+        references=["<m0@x.example.com>", "<m1@x.example.com>"],
     )
     m = email.message_from_bytes(raw, policy=policy.default)
-    assert str(m["From"]) == "Tomáš <me@x.cz>"
-    assert m["In-Reply-To"] == "<m1@x.cz>" and m["References"] == "<m0@x.cz> <m1@x.cz>"
-    assert m["Message-ID"] == msgid and msgid.endswith("@x.cz>")
+    assert str(m["From"]) == "Tomáš <me@x.example.com>"
+    assert (
+        m["In-Reply-To"] == "<m1@x.example.com>"
+        and m["References"] == "<m0@x.example.com> <m1@x.example.com>"
+    )
+    assert m["Message-ID"] == msgid and msgid.endswith("@x.example.com>")
     assert m.get_content().strip() == "Díky!"
     assert b"\r\n" in raw and "Bcc" not in m
 
 
 def test_build_draft_bcc_and_html():
     raw, _ = parse.build_draft(
-        from_addr="me@x.cz",
+        from_addr="me@x.example.com",
         from_name=None,
-        to=["a@y.cz"],
+        to=["a@y.example.org"],
         cc=[],
-        bcc=["h@y.cz"],
+        bcc=["h@y.example.org"],
         subject="S",
         body="<p>Hi</p>",
         html=True,
@@ -181,7 +186,7 @@ def test_build_draft_bcc_and_html():
         references=[],
     )
     m = email.message_from_bytes(raw, policy=policy.default)
-    assert m["Bcc"] == "h@y.cz"
+    assert m["Bcc"] == "h@y.example.org"
     assert m.get_body(("plain",)) is not None and m.get_body(("html",)) is not None
 
 
@@ -229,9 +234,9 @@ def test_build_draft_html_deep_nesting_does_not_crash():
     depth = sys.getrecursionlimit() * 5
     body = "<div>" * depth + "deep body" + "</div>" * depth
     raw, msgid = parse.build_draft(
-        from_addr="me@x.cz",
+        from_addr="me@x.example.com",
         from_name=None,
-        to=["a@y.cz"],
+        to=["a@y.example.org"],
         cc=[],
         bcc=[],
         subject="S",
@@ -266,7 +271,7 @@ def test_get_attachment_deeply_nested_multipart_raises_keyerror():
 def test_message_rfc822_attachment_counts_as_one_part_and_is_not_descended():
     inner = EmailMessage()
     inner["Subject"] = "Inner subject"
-    inner["From"] = "inner@x.cz"
+    inner["From"] = "inner@x.example.com"
     inner.set_content("Inner body, long enough to be a real plain-text body for sure.")
     inner.add_attachment(b"\x89PNGfake", maintype="image", subtype="png", filename="inner.png")
 

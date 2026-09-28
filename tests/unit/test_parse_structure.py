@@ -11,7 +11,7 @@ from tests.unit.bodystructure import bodystructure_of
 
 def _mixed() -> EmailMessage:
     m = EmailMessage()
-    m["From"], m["To"], m["Subject"] = "a@b.cz", "c@d.cz", "Faktura"
+    m["From"], m["To"], m["Subject"] = "a@b.example.net", "c@d.example.net", "Faktura"
     m.set_content("Dobrý den, v příloze posílám fakturu za září. S pozdravem")
     m.add_alternative("<p>Dobrý den, v <b>příloze</b> posílám fakturu.</p>", subtype="html")
     m.add_attachment(
@@ -107,7 +107,7 @@ def test_parse_large_message_uses_the_same_body_choice():
     plain = m.get_body(("plain",)).get_payload().encode()  # still transfer-encoded
     texts = {plan.plain.section: plain}
     parsed = parse.parse_large_message(header, plan, texts)
-    assert parsed.subject == "Faktura" and parsed.from_ == "a@b.cz"
+    assert parsed.subject == "Faktura" and parsed.from_ == "a@b.example.net"
     assert parsed.body_source == "plain" and parsed.body_text.startswith("Dobrý den, v příloze")
     assert [a.filename for a in parsed.attachments][:2] == [
         "faktura.pdf",

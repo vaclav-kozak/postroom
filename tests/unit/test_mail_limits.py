@@ -16,7 +16,7 @@ from tests.unit.test_mail_tools import FakeMail, FakeReader
 
 @pytest.fixture
 def two_accounts(repo):
-    for e in ("a@x.cz", "b@x.cz"):
+    for e in ("a@x.example.com", "b@x.example.com"):
         repo.upsert(
             email=e,
             provider=Provider.IMAP,
@@ -48,7 +48,7 @@ def searcher(repo):
 async def test_max_chars_has_an_upper_bound(reader, tool):
     mcp, mail = reader
     mail.error = LookupError("message not found")
-    args = {"account": "a@x.cz", "folder": "inbox", "uid": 1}
+    args = {"account": "a@x.example.com", "folder": "inbox", "uid": 1}
     if tool == "get_attachment":
         args["index"] = 0
     async with Client(mcp) as c:
@@ -92,16 +92,21 @@ def _many(n):
 
 async def test_search_one_account_fetches_only_the_page(repo, two_accounts):
     fake = CountingFake(_many(1500))
-    svc = MailService(repo, StubPool({"a@x.cz": fake}))
-    res = await svc.search(["a@x.cz"], "inbox", SearchCriteria(), limit=100, offset=900)
+    svc = MailService(repo, StubPool({"a@x.example.com": fake}))
+    res = await svc.search(["a@x.example.com"], "inbox", SearchCriteria(), limit=100, offset=900)
     assert [m.uid for m in res.results] == list(range(600, 500, -1))
     assert sum(fake.fetch_sizes) == 100
 
 
 async def test_search_many_accounts_fetches_in_chunks(repo, two_accounts):
-    fakes = {"a@x.cz": CountingFake(_many(1500)), "b@x.cz": CountingFake(_many(1500))}
+    fakes = {
+        "a@x.example.com": CountingFake(_many(1500)),
+        "b@x.example.com": CountingFake(_many(1500)),
+    }
     svc = MailService(repo, StubPool(fakes))
-    res = await svc.search(["a@x.cz", "b@x.cz"], "inbox", SearchCriteria(), limit=100, offset=1000)
+    res = await svc.search(
+        ["a@x.example.com", "b@x.example.com"], "inbox", SearchCriteria(), limit=100, offset=1000
+    )
     assert len(res.results) == 100
     for fake in fakes.values():
         assert max(fake.fetch_sizes) <= service.FETCH_CHUNK
@@ -126,9 +131,9 @@ async def test_search_attachment_filter_stops_when_it_has_enough(repo, two_accou
             return out
 
     fake = AttachmentFake(_many(3000))
-    svc = MailService(repo, StubPool({"a@x.cz": fake}))
+    svc = MailService(repo, StubPool({"a@x.example.com": fake}))
     res = await svc.search(
-        ["a@x.cz"], "inbox", SearchCriteria(has_attachment=True), limit=10, offset=20
+        ["a@x.example.com"], "inbox", SearchCriteria(has_attachment=True), limit=10, offset=20
     )
     assert [m.uid for m in res.results] == list(range(2959, 2939, -2))
     assert sum(fake.fetch_sizes) <= service.FETCH_CHUNK  # ~60 needed, not 3 x (offset + limit)
@@ -136,6 +141,10 @@ async def test_search_attachment_filter_stops_when_it_has_enough(repo, two_accou
 
 async def test_search_offset_is_capped_in_the_service(repo, two_accounts):
     fake = CountingFake(_many(3000))
-    svc = MailService(repo, StubPool({"a@x.cz": fake, "b@x.cz": CountingFake({})}))
-    await svc.search(["a@x.cz", "b@x.cz"], "inbox", SearchCriteria(), limit=100, offset=50_000)
+    svc = MailService(
+        repo, StubPool({"a@x.example.com": fake, "b@x.example.com": CountingFake({})})
+    )
+    await svc.search(
+        ["a@x.example.com", "b@x.example.com"], "inbox", SearchCriteria(), limit=100, offset=50_000
+    )
     assert sum(fake.fetch_sizes) <= 1100

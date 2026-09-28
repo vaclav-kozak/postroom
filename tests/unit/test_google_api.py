@@ -75,7 +75,7 @@ def test_update_refuses_event_with_attendees(api):
         json={
             "id": "e1",
             "summary": "Meet",
-            "attendees": [{"email": "bob@x.cz"}],
+            "attendees": [{"email": "bob@x.example.com"}],
             "start": {"dateTime": "2026-10-01T12:00:00+02:00"},
             "end": {"dateTime": "2026-10-01T13:00:00+02:00"},
         }
@@ -155,7 +155,7 @@ def test_search_contacts_merges_and_warms_up(api):
                             "emailAddresses": [{"value": "jan@example.com"}],
                         }
                     },
-                    {"person": {"emailAddresses": [{"value": "jana@y.cz"}]}},
+                    {"person": {"emailAddresses": [{"value": "jana@y.example.org"}]}},
                 ]
             },
         )
@@ -165,5 +165,5 @@ def test_search_contacts_merges_and_warms_up(api):
     oc = respx.get(f"{PEOPLE}/otherContacts:search")
     oc.side_effect = other
     res = api.search_contacts("jan", limit=10)
-    assert [c.emails[0] for c in res] == ["jan@example.com", "jana@y.cz"]
+    assert [c.emails[0] for c in res] == ["jan@example.com", "jana@y.example.org"]
     assert sc.call_count == 2 and oc.call_count == 2  # warm-up + real

@@ -91,7 +91,7 @@ class SectionServer:
 @pytest.fixture
 def account(repo):
     repo.upsert(
-        email="a@x.cz",
+        email="a@x.example.com",
         provider=Provider.IMAP,
         imap_host="h",
         imap_port=993,
@@ -99,11 +99,11 @@ def account(repo):
         secret="p",
         status=AccountStatus.CONNECTED,
     )
-    return "a@x.cz"
+    return "a@x.example.com"
 
 
 def _svc(repo, server):
-    return MailService(repo, StubPool({"a@x.cz": server}))
+    return MailService(repo, StubPool({"a@x.example.com": server}))
 
 
 def _assert_peek_only(server):
@@ -116,7 +116,7 @@ def _assert_peek_only(server):
 async def test_large_message_is_read_by_section(repo, account):
     raw = _mixed().as_bytes()
     server = SectionServer(raw, size=30 * 1024 * 1024)
-    detail = await _svc(repo, server).get_message("a@x.cz", "INBOX", 1)
+    detail = await _svc(repo, server).get_message("a@x.example.com", "INBOX", 1)
     _assert_peek_only(server)
     assert f"BODY.PEEK[HEADER]<0.{parse.MAX_HEADER_BYTES}>" in server.items
     assert detail.message.subject == "Faktura"
@@ -131,7 +131,7 @@ async def test_large_message_is_read_by_section(repo, account):
 async def test_large_message_body_cut_is_flagged(repo, account, monkeypatch):
     monkeypatch.setattr(service, "MAX_TEXT_PART_FETCH", 40)
     server = SectionServer(_mixed().as_bytes(), size=30 * 1024 * 1024)
-    detail = await _svc(repo, server).get_message("a@x.cz", "INBOX", 1)
+    detail = await _svc(repo, server).get_message("a@x.example.com", "INBOX", 1)
     assert detail.truncated is True
     assert detail.message.body_text.endswith(service.BODY_NOT_LOADED)
     assert "BODY.PEEK[1.1]<0.40>" in server.items
@@ -140,14 +140,14 @@ async def test_large_message_body_cut_is_flagged(repo, account, monkeypatch):
 async def test_message_with_many_parts_is_read_by_section(repo, account, monkeypatch):
     monkeypatch.setattr(service, "MAX_FULL_PARSE_PARTS", 3)
     server = SectionServer(_mixed().as_bytes())  # small, but 6 parts
-    detail = await _svc(repo, server).get_message("a@x.cz", "INBOX", 1)
+    detail = await _svc(repo, server).get_message("a@x.example.com", "INBOX", 1)
     _assert_peek_only(server)
     assert len(detail.message.attachments) == 4
 
 
 async def test_small_message_is_still_parsed_whole(repo, account):
     server = SectionServer(_mixed().as_bytes())
-    detail = await _svc(repo, server).get_message("a@x.cz", "INBOX", 1)
+    detail = await _svc(repo, server).get_message("a@x.example.com", "INBOX", 1)
     assert FETCH_BODY in server.items
     assert detail.message.body_text.startswith("Dobrý den")
 
@@ -155,19 +155,19 @@ async def test_small_message_is_still_parsed_whole(repo, account):
 async def test_large_message_attachment_is_fetched_alone(repo, account):
     raw = _mixed().as_bytes()
     server = SectionServer(raw, size=30 * 1024 * 1024)
-    info, data = await _svc(repo, server).get_attachment("a@x.cz", "INBOX", 1, 0)
+    info, data = await _svc(repo, server).get_attachment("a@x.example.com", "INBOX", 1, 0)
     _assert_peek_only(server)
     _, full_data = parse.get_attachment(raw, 0)
     assert (info.filename, info.content_type, data) == ("faktura.pdf", "application/pdf", full_data)
     assert info.size == len(full_data)
-    info, data = await _svc(repo, server).get_attachment("a@x.cz", "INBOX", 1, 2)
+    info, data = await _svc(repo, server).get_attachment("a@x.example.com", "INBOX", 1, 2)
     assert info.content_type == "message/rfc822" and b"Subject: forwarded" in data
 
 
 async def test_large_message_attachment_over_cap_is_not_fetched(repo, account, monkeypatch):
     monkeypatch.setattr(service, "MAX_ATTACHMENT_FETCH_BYTES", 100)
     server = SectionServer(_mixed().as_bytes(), size=30 * 1024 * 1024)
-    info, data = await _svc(repo, server).get_attachment("a@x.cz", "INBOX", 1, 0)
+    info, data = await _svc(repo, server).get_attachment("a@x.example.com", "INBOX", 1, 0)
     assert data is None and info.filename == "faktura.pdf"
     assert not any(i.startswith("BODY.PEEK[2]") for i in server.items)
 
@@ -175,7 +175,7 @@ async def test_large_message_attachment_over_cap_is_not_fetched(repo, account, m
 async def test_large_message_bad_attachment_index(repo, account):
     server = SectionServer(_mixed().as_bytes(), size=30 * 1024 * 1024)
     with pytest.raises(KeyError):
-        await _svc(repo, server).get_attachment("a@x.cz", "INBOX", 1, 9)
+        await _svc(repo, server).get_attachment("a@x.example.com", "INBOX", 1, 9)
 
 
 async def test_large_message_without_structure_is_refused(repo, account):
@@ -187,7 +187,7 @@ async def test_large_message_without_structure_is_refused(repo, account):
 
     server = NoStructure(_mixed().as_bytes(), size=30 * 1024 * 1024)
     with pytest.raises(ImapError, match="too large"):
-        await _svc(repo, server).get_message("a@x.cz", "INBOX", 1)
+        await _svc(repo, server).get_message("a@x.example.com", "INBOX", 1)
     assert FETCH_BODY not in server.items
 
 
@@ -207,9 +207,9 @@ async def test_big_reads_queue_on_the_heavy_work_gate(repo, account, monkeypatch
     holding.wait(5)
     try:
         with pytest.raises(ServerBusy):
-            await _svc(repo, server).get_message("a@x.cz", "INBOX", 1)
+            await _svc(repo, server).get_message("a@x.example.com", "INBOX", 1)
         with pytest.raises(ServerBusy):
-            await _svc(repo, server).get_attachment("a@x.cz", "INBOX", 1, 0)
+            await _svc(repo, server).get_attachment("a@x.example.com", "INBOX", 1, 0)
     finally:
         release.set()
         t.join()
@@ -229,7 +229,7 @@ async def test_small_plain_read_does_not_wait_for_the_gate(repo, account, monkey
     t.start()
     holding.wait(5)
     try:
-        detail = await _svc(repo, server).get_message("a@x.cz", "INBOX", 1)
+        detail = await _svc(repo, server).get_message("a@x.example.com", "INBOX", 1)
     finally:
         release.set()
         t.join()
@@ -239,13 +239,13 @@ async def test_small_plain_read_does_not_wait_for_the_gate(repo, account, monkey
 async def test_thread_and_reply_fetch_headers_with_a_cap(repo, account):
     capped = f"BODY.PEEK[HEADER]<0.{parse.MAX_HEADER_BYTES}>"
     server = SectionServer(_mixed().as_bytes())
-    await _svc(repo, server).get_thread("a@x.cz", "INBOX", 1)
+    await _svc(repo, server).get_thread("a@x.example.com", "INBOX", 1)
     assert capped in server.items and "BODY.PEEK[HEADER]" not in server.items
     server.items.clear()
     server.appended = []
     server.append = lambda folder, msg, flags=(), msg_time=None: server.appended.append(msg)
     await _svc(repo, server).create_draft(
-        "a@x.cz", to=[], subject=None, body="ok", reply_folder="INBOX", reply_uid=1
+        "a@x.example.com", to=[], subject=None, body="ok", reply_folder="INBOX", reply_uid=1
     )
     assert capped in server.items
     assert b"Subject: Re: Faktura" in server.appended[0]
@@ -273,15 +273,15 @@ class GreenMailLike(SectionServer):
 async def test_large_message_parts_that_fit_are_fetched_whole(repo, account):
     raw = _mixed().as_bytes()
     server = GreenMailLike(raw, size=30 * 1024 * 1024)
-    detail = await _svc(repo, server).get_message("a@x.cz", "INBOX", 1)
+    detail = await _svc(repo, server).get_message("a@x.example.com", "INBOX", 1)
     assert detail.message.subject == "Faktura"
     assert detail.message.body_text.startswith("Dobrý den, v příloze")
-    _, data = await _svc(repo, server).get_attachment("a@x.cz", "INBOX", 1, 0)
+    _, data = await _svc(repo, server).get_attachment("a@x.example.com", "INBOX", 1, 0)
     assert data == parse.get_attachment(raw, 0)[1]
     _assert_peek_only(server)
     assert "BODY.PEEK[1.1]" in server.items and "BODY.PEEK[2]" in server.items
     # an attached message as HEADER + TEXT, which every server answers the same way
-    _, data = await _svc(repo, server).get_attachment("a@x.cz", "INBOX", 1, 2)
+    _, data = await _svc(repo, server).get_attachment("a@x.example.com", "INBOX", 1, 2)
     assert data == parse.get_attachment(raw, 2)[1]
 
 
@@ -303,7 +303,7 @@ def _with_attachment(size: int) -> bytes:
     from email.message import EmailMessage
 
     m = EmailMessage()
-    m["From"], m["To"], m["Subject"] = "p@example.org", "a@x.cz", "big"
+    m["From"], m["To"], m["Subject"] = "p@example.org", "a@x.example.com", "big"
     m.set_content("see attached")
     m.add_attachment(bytes(range(256)) * (size // 256), maintype="application", subtype="pdf")
     return m.as_bytes()

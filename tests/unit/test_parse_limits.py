@@ -80,7 +80,7 @@ def test_header_bomb_is_capped_before_parsing():
     import tracemalloc
 
     raw = (
-        b"From: a@b.cz\r\nSubject: hello\r\n"
+        b"From: a@b.example.net\r\nSubject: hello\r\n"
         + b"X-Junk: a\r\n" * 600_000  # ~6.6 MiB of header lines: +145 MiB to parse whole
         + b"Content-Type: text/html\r\n\r\n<p>the body text survives the header cap</p>\r\n"
     )
@@ -88,7 +88,7 @@ def test_header_bomb_is_capped_before_parsing():
     msg = parse.parse_message(raw)
     _, peak = tracemalloc.get_traced_memory()
     tracemalloc.stop()
-    assert msg.subject == "hello" and msg.from_ == "a@b.cz"
+    assert msg.subject == "hello" and msg.from_ == "a@b.example.net"
     assert "the body text survives" in msg.body_text
     assert peak < 40 * 2**20
 

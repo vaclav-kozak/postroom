@@ -1,5 +1,9 @@
+import tomllib
+from pathlib import Path
+
 from fastmcp import Client
 
+from postroom import __version__
 from postroom.accounts import AccountStatus, Provider
 from postroom.app import (
     SERVER_INSTRUCTIONS,
@@ -190,3 +194,11 @@ async def test_the_largest_inline_attachment_fits_the_sdk_request_limit(settings
         },
     }
     assert len(json.dumps(request).encode()) < limiter.max_body_size - 512 * 1024
+
+
+async def test_server_reports_postroom_version(settings):
+    pyproject = Path(__file__).parents[2] / "pyproject.toml"
+    assert __version__ == tomllib.loads(pyproject.read_text())["project"]["version"]
+    async with Client(build_mcp(build_services(settings))) as c:
+        info = c.server_info
+    assert (info.name, info.version) == ("postroom", __version__)

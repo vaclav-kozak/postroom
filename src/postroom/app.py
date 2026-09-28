@@ -14,6 +14,7 @@ from starlette.requests import Request
 from starlette.responses import RedirectResponse
 from starlette.routing import Route
 
+from postroom import __version__
 from postroom.accounts import AccountRepo, AccountStatus
 from postroom.auth.owner import LoginGuard, OwnerAuth
 from postroom.auth.provider import PostroomOAuthProvider
@@ -156,6 +157,7 @@ def build_mcp(services: Services, auth=None) -> FastMCP:
     # any unexpected exception is reported generically so its text can't leak anything.
     mcp = FastMCP(
         "postroom",
+        version=__version__,
         instructions=server_instructions(services.settings.timezone),
         auth=auth,
         mask_error_details=True,

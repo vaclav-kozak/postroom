@@ -67,7 +67,7 @@ Open **Google Auth Platform** (or **APIs & Services → OAuth consent screen**) 
    | `https://www.googleapis.com/auth/contacts.other.readonly` | Search "other contacts" (people you have emailed). |
 
    Postroom always asks for this whole set. Google lists `https://mail.google.com/` as a
-   restricted scope; that matters for apps that other people use, not for yours (see step 5).
+   restricted scope; that matters for apps that other people use, not for yours (see step 4).
 5. **Audience → Test users** (External only): add the Google account(s) you will connect.
 
 ## 4. Publish the app (External only)

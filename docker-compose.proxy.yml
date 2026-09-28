@@ -4,10 +4,11 @@
 # X-Forwarded-For (and preferably X-Real-IP and X-Forwarded-Proto).
 #
 #   cp .env.example .env          # then set POSTROOM_PUBLIC_URL
-#   docker compose --progress quiet -f docker-compose.proxy.yml run --rm --no-deps -T postroom \
-#     postroom gen-secrets --env-out /dev/stdout --password-out /dev/stderr \
-#     | grep '^POSTROOM_' >> .env  # the admin password is printed on the terminal: keep it
-#   docker compose -f docker-compose.proxy.yml up -d
+#   echo 'COMPOSE_FILE=docker-compose.proxy.yml' >> .env   # every compose command uses it
+#   docker compose --progress quiet run --rm --no-deps -T postroom \
+#     postroom gen-secrets --env-out /dev/stdout | grep '^POSTROOM_' >> .env
+#                                 # once only; it prints "Admin password: ...": keep it
+#   docker compose up -d
 
 name: postroom
 

@@ -201,13 +201,23 @@ renews a Let's Encrypt certificate automatically.
 
 **1. Get the files.**
 
+Only `docker-compose.yml`, `.env.example` and `deploy/caddy/Caddyfile` are needed.
+Download them into a new directory, keeping the layout:
+
+```sh
+mkdir -p postroom/deploy/caddy && cd postroom
+base=https://raw.githubusercontent.com/vaclav-kozak/postroom/main
+curl -fsSLO "$base/docker-compose.yml"
+curl -fsSLO "$base/.env.example"
+curl -fsSL -o deploy/caddy/Caddyfile "$base/deploy/caddy/Caddyfile"
+```
+
+Or clone the whole repository:
+
 ```sh
 git clone https://github.com/vaclav-kozak/postroom.git
 cd postroom
 ```
-
-Only `docker-compose.yml`, `deploy/caddy/Caddyfile` and `.env.example` are needed, so you
-can also download just those three files, keeping the same layout.
 
 **2. Set the address.**
 
@@ -223,14 +233,19 @@ POSTROOM_PUBLIC_URL=https://mcp.example.com
 ```
 
 **3. Generate the secrets.** This appends the master key, the session secret and the admin
-password hash to `.env`, and prints the admin password on the terminal. Store the password
+password hash to `.env`, and prints `Admin password: …` on the terminal. Store the password
 in your password manager.
 
 ```sh
 docker compose --progress quiet run --rm --no-deps -T postroom \
-  postroom gen-secrets --env-out /dev/stdout --password-out /dev/stderr \
-  | grep '^POSTROOM_' >> .env
+  postroom gen-secrets --env-out /dev/stdout | grep '^POSTROOM_' >> .env
 ```
+
+Run this **once**. A second run would append a second master key, and the accounts already
+saved could no longer be decrypted, so `gen-secrets` refuses while `.env` has a
+`POSTROOM_MASTER_KEY`. To start over, delete the three `POSTROOM_MASTER_KEY`,
+`POSTROOM_SESSION_SECRET` and `POSTROOM_ADMIN_PASSWORD_HASH_B64` lines first. To change
+only the admin password, see [Operations](#operations).
 
 **4. Start it.**
 
@@ -250,15 +265,23 @@ accounts, and [connect Claude](#connecting-clients).
 
 If the server already runs nginx, Traefik or Caddy, use `docker-compose.proxy.yml`. It
 starts Postroom alone and publishes it on `127.0.0.1:8000` only (change the port with
-`POSTROOM_PORT`). Add `-f docker-compose.proxy.yml` to every compose command:
+`POSTROOM_PORT`). It needs only `docker-compose.proxy.yml` and `.env.example` (or a clone
+of the repository):
 
 ```sh
+mkdir postroom && cd postroom
+base=https://raw.githubusercontent.com/vaclav-kozak/postroom/main
+curl -fsSLO "$base/docker-compose.proxy.yml"
+curl -fsSLO "$base/.env.example"
 cp .env.example .env        # set POSTROOM_PUBLIC_URL (POSTROOM_DOMAIN is not used here)
-docker compose --progress quiet -f docker-compose.proxy.yml run --rm --no-deps -T postroom \
-  postroom gen-secrets --env-out /dev/stdout --password-out /dev/stderr \
-  | grep '^POSTROOM_' >> .env
-docker compose -f docker-compose.proxy.yml up -d
+echo 'COMPOSE_FILE=docker-compose.proxy.yml' >> .env   # every compose command now uses it
+docker compose --progress quiet run --rm --no-deps -T postroom \
+  postroom gen-secrets --env-out /dev/stdout | grep '^POSTROOM_' >> .env
+docker compose up -d
 ```
+
+With `COMPOSE_FILE` in `.env`, every `docker compose` command in this README, including
+those under [Operations](#operations), uses the proxy variant without `-f`.
 
 [`deploy/nginx/postroom.conf.example`](deploy/nginx/postroom.conf.example) is a complete
 nginx site: TLS, HSTS, a rate limit on the login and OAuth endpoints, 4 MB bodies and
@@ -495,6 +518,7 @@ a consistent copy while Postroom runs:
 ```sh
 docker compose exec postroom python -c "import sqlite3; s=sqlite3.connect('/data/postroom.db'); d=sqlite3.connect('/data/backup.db'); s.backup(d)"
 docker compose cp postroom:/data/backup.db ./postroom-backup.db
+docker compose exec postroom rm /data/backup.db
 ```
 
 **Upgrading.** Database migrations run automatically at startup.
@@ -520,7 +544,7 @@ it.
 | Command | What it does |
 |---|---|
 | `serve [--host H] [--port P]` | Runs the HTTP server (the container's default command). |
-| `gen-secrets --env-out F --password-out F` | Generates the master key, the session secret and an admin password with its hash. |
+| `gen-secrets --env-out F [--password-out F] [--force]` | Generates the master key, the session secret and an admin password with its hash; prints the password on stderr unless `--password-out` is given. Refuses while `POSTROOM_MASTER_KEY` is set, unless `--force`. |
 | `set-password [--stdin]` | Prints a new `POSTROOM_ADMIN_PASSWORD_HASH_B64` line. |
 | `hash-password` | Hashes a password read from stdin. |
 | `list-accounts` | Lists the accounts with status, access level and last error. |

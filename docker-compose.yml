@@ -3,8 +3,8 @@
 #
 #   cp .env.example .env          # then set POSTROOM_DOMAIN and POSTROOM_PUBLIC_URL
 #   docker compose --progress quiet run --rm --no-deps -T postroom \
-#     postroom gen-secrets --env-out /dev/stdout --password-out /dev/stderr \
-#     | grep '^POSTROOM_' >> .env  # the admin password is printed on the terminal: keep it
+#     postroom gen-secrets --env-out /dev/stdout | grep '^POSTROOM_' >> .env
+#                                 # once only; it prints "Admin password: ...": keep it
 #   docker compose up -d
 #
 # Ports 80 and 443 must be reachable from the internet for the certificate.

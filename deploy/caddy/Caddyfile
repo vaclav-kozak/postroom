@@ -8,11 +8,12 @@
 # No access log on purpose: query strings can carry one-time OAuth codes.
 
 {$POSTROOM_DOMAIN} {
-	# Request bodies: 1 MB, except on the MCP endpoint, where send_email carries attachments
-	# (up to 10 MiB, about 14 MB as base64 in JSON). The two matchers never overlap.
+	# Request bodies: 1 MB, except on the MCP endpoint, where send_email carries small
+	# inline attachments (up to 2 MiB, under the MCP server's own 4 MiB request limit as
+	# base64 in JSON). The two matchers never overlap.
 	@mcp path /mcp /mcp/*
 	request_body @mcp {
-		max_size 16MB
+		max_size 4MB
 	}
 	@not_mcp not path /mcp /mcp/*
 	request_body @not_mcp {

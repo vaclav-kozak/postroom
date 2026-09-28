@@ -21,7 +21,9 @@ need this: adding accounts in the admin UI works just as well.
 - **CalDAV/CardDAV URLs** of those accounts, but only `https` ones (`http` only on loopback).
 - **Google accounts** are created without credentials. The refresh tokens in an eM Client
   export belong to eM Client's own OAuth client, so Postroom cannot use them. Reconnect each
-  Google account in the admin UI.
+  Google account in the admin UI. This includes a Gmail account that eM Client reaches
+  with an app password: to use it without Google OAuth, remove the imported account and
+  add it in the admin UI as an IMAP account on `imap.gmail.com` with the app password.
 - Accounts without IMAP (for example pure CalDAV accounts) are skipped.
 
 Running the import again updates existing accounts instead of duplicating them.

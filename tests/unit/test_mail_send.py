@@ -450,6 +450,37 @@ async def test_gmail_files_sent_mail_itself(repo, accounts):
     assert result.saved_to_sent is True and result.sent_folder == "sent"
 
 
+@pytest.mark.parametrize(
+    ("imap_host", "smtp_host", "gmail_files"),
+    [
+        ("imap.gmail.com", "smtp.gmail.com", True),
+        ("imap.googlemail.com", "smtp.googlemail.com", True),
+        ("imap.googlemail.com", "smtp.gmail.com", True),
+        ("imap.gmail.com", "smtp.example.com", False),  # a relay: Gmail never sees it
+    ],
+)
+async def test_gmail_app_password_account_is_not_filed_twice(
+    repo, accounts, imap_host, smtp_host, gmail_files
+):
+    repo.upsert(
+        email="p@gmail.com",
+        provider=Provider.IMAP,
+        imap_host=imap_host,
+        imap_port=993,
+        imap_security="ssl",
+        secret="app-password",
+        status=AccountStatus.CONNECTED,
+        smtp_host=smtp_host,
+        mail_access=MailAccess.FULL,
+    )
+    imap, smtp = MailFake({"INBOX": {}}), FakeSmtp()
+    result = await service(repo, {"p@gmail.com": imap}, smtp).send(
+        "p@gmail.com", to=["bob@example.org"], subject="x"
+    )
+    assert len(smtp.sent) == 1 and result.saved_to_sent is True
+    assert (imap.ops("append") == []) is gmail_files
+
+
 async def test_gmail_reply_still_marks_answered(repo, accounts):
     imap = MailFake({"INBOX": {7: (set(), message())}})
     await service(repo, {G: imap}).send(G, to=None, subject=None, reply_uid=7)

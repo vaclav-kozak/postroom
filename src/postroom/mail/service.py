@@ -29,7 +29,7 @@ from email import policy as email_policy
 import imapclient
 from imapclient.exceptions import IMAPClientAbortError, IMAPClientError, IMAPClientReadOnlyError
 
-from postroom.accounts import Account, AccountRepo, AccountStatus, MailAccess
+from postroom.accounts import GMAIL_SMTP_HOSTS, Account, AccountRepo, AccountStatus, MailAccess
 from postroom.mail.folders import FolderNotFound, resolve_folder, special_use_of
 from postroom.mail.heavy import heavy_work
 from postroom.mail.imap import (
@@ -614,7 +614,7 @@ def _maybe_sent_message(error: Exception, result: SendResult) -> str:
 def _gmail_files_sent_mail(account: Account) -> bool:
     """Gmail puts mail sent through its SMTP server into Sent by itself."""
     server = account.smtp_server
-    return account.is_gmail and server is not None and server[0].lower() == "smtp.gmail.com"
+    return account.is_gmail and server is not None and server[0].lower() in GMAIL_SMTP_HOSTS
 
 
 def _threading_headers(original: ParsedMessage) -> tuple[str | None, list[str]]:

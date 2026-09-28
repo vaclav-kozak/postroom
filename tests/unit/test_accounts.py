@@ -153,3 +153,8 @@ def test_gmail_semantics_and_google_oauth_are_separate(repo):
     assert p.is_gmail and not p.uses_google_oauth
     o = repo.upsert(email="o@example.org", provider=Provider.IMAP, imap_host="imap.example.org")
     assert not o.is_gmail and not o.uses_google_oauth
+
+
+def test_googlemail_host_names_are_gmail(repo):
+    a = repo.upsert(email="p@gmail.com", provider=Provider.IMAP, imap_host="imap.googlemail.com")
+    assert a.is_gmail and not a.uses_google_oauth

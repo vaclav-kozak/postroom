@@ -31,6 +31,9 @@ class SmtpStatus(StrEnum):
 # Google accounts send through Gmail's SMTP server with the account's OAuth access token
 # (XOAUTH2); the https://mail.google.com/ scope covers SMTP as well as IMAP.
 GMAIL_SMTP = ("smtp.gmail.com", 465, "ssl")
+# Gmail's server names, including the older googlemail.com ones that still work.
+GMAIL_IMAP_HOSTS = frozenset({"imap.gmail.com", "imap.googlemail.com"})
+GMAIL_SMTP_HOSTS = frozenset({"smtp.gmail.com", "smtp.googlemail.com"})
 
 
 class MailAccess(StrEnum):
@@ -119,7 +122,7 @@ class Account:
     def is_gmail(self) -> bool:
         """Whether the mailbox is Gmail, however it logs in: Gmail's mail semantics apply
         (X-GM-EXT search and threads, All Mail as the archive, Sent filed by Gmail)."""
-        return self.uses_google_oauth or (self.imap_host or "").lower() == "imap.gmail.com"
+        return self.uses_google_oauth or (self.imap_host or "").lower() in GMAIL_IMAP_HOSTS
 
     def allows(self, level: MailAccess) -> bool:
         return self.mail_access.rank >= level.rank

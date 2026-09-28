@@ -1,0 +1,64 @@
+# Postroom with bundled HTTPS: Caddy terminates TLS (automatic Let's Encrypt certificate for
+# POSTROOM_DOMAIN) and is the only thing that can reach Postroom.
+#
+#   cp .env.example .env          # then set POSTROOM_DOMAIN and POSTROOM_PUBLIC_URL
+#   docker compose --progress quiet run --rm --no-deps -T postroom \
+#     postroom gen-secrets --env-out /dev/stdout --password-out /dev/stderr \
+#     | grep '^POSTROOM_' >> .env  # the admin password is printed on the terminal: keep it
+#   docker compose up -d
+#
+# Ports 80 and 443 must be reachable from the internet for the certificate.
+# Already running nginx, Traefik or Caddy? Use docker-compose.proxy.yml instead.
+
+name: postroom
+
+services:
+  postroom:
+    image: ghcr.io/vaclav-kozak/postroom:${POSTROOM_VERSION:-latest}
+    # To build from this checkout instead of pulling the published image:
+    # build: .
+    restart: unless-stopped
+    env_file:
+      - path: .env
+        required: false
+    environment:
+      # Caddy reaches Postroom over the compose network (private addresses): believe its
+      # X-Forwarded-For. Nothing else can connect, because no port is published.
+      POSTROOM_TRUSTED_PROXIES: ${POSTROOM_TRUSTED_PROXIES:-10.0.0.0/8,172.16.0.0/12,192.168.0.0/16,fc00::/7}
+    volumes:
+      - postroom-data:/data
+    read_only: true
+    tmpfs:
+      - /tmp:size=16m
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+    mem_limit: 256m
+    pids_limit: 128
+    logging: &logging
+      driver: json-file
+      options:
+        max-size: 10m
+        max-file: "3"
+
+  caddy:
+    image: caddy:2-alpine
+    restart: unless-stopped
+    depends_on: [postroom]
+    ports:
+      - "80:80"
+      - "443:443"
+      - "443:443/udp"
+    environment:
+      POSTROOM_DOMAIN: ${POSTROOM_DOMAIN:-}
+    volumes:
+      - ./deploy/caddy/Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy-data:/data
+      - caddy-config:/config
+    logging: *logging
+
+volumes:
+  # Postroom's SQLite database (accounts, encrypted secrets, OAuth clients). Back it up.
+  postroom-data:
+  # Caddy's certificates and ACME account.
+  caddy-data:
+  caddy-config:

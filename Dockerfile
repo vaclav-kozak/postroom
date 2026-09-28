@@ -3,12 +3,17 @@ FROM python:3.13-slim-bookworm AS build
 COPY --from=ghcr.io/astral-sh/uv:0.8 /uv /usr/local/bin/uv
 ENV UV_COMPILE_BYTECODE=1 UV_LINK_MODE=copy UV_PYTHON_DOWNLOADS=never
 WORKDIR /app
-COPY pyproject.toml uv.lock .python-version README.md ./
+COPY pyproject.toml uv.lock .python-version README.md LICENSE NOTICE ./
 RUN uv sync --frozen --no-dev --no-install-project
 COPY src ./src
 RUN uv sync --frozen --no-dev --no-editable
 
 FROM python:3.13-slim-bookworm
+LABEL org.opencontainers.image.title="Postroom" \
+      org.opencontainers.image.description="Self-hosted MCP server for all your mailboxes, calendars, tasks and contacts (IMAP, CalDAV/CardDAV, Google)" \
+      org.opencontainers.image.source="https://github.com/vaclav-kozak/postroom" \
+      org.opencontainers.image.url="https://github.com/vaclav-kozak/postroom" \
+      org.opencontainers.image.licenses="Apache-2.0"
 RUN useradd --system --uid 10001 --user-group --home-dir /nonexistent --shell /usr/sbin/nologin postroom \
  && mkdir /data && chown postroom:postroom /data
 COPY --from=build /app/.venv /app/.venv

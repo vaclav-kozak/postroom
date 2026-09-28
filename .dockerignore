@@ -1,10 +1,20 @@
+# The image needs only pyproject.toml, uv.lock, .python-version, README.md, LICENSE, NOTICE, src/.
 .git
+.github
 .venv
+.worktrees
 data
 secrets
 tests
 docs
 deploy
+docker-compose*.yml
+Dockerfile
+.dockerignore
+.editorconfig
+.env.example
+CONTRIBUTING.md
+SECURITY.md
 **/__pycache__
 *.xml
 *passphrase*

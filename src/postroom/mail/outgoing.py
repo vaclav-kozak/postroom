@@ -30,8 +30,8 @@ MAX_ATTACHMENTS = 20
 # JSON, which the MCP server limits to 4 MiB per request: 2 MiB stays well under it. Larger
 # files go out with forward_email or send_draft, which read them on the server.
 MAX_ATTACHMENT_BYTES = 2 * 1024 * 1024
-MAX_FORWARD_ATTACHMENT_BYTES = 20 * 1024 * 1024  # decoded, all re-attached originals
-MAX_DRAFT_BYTES = 25 * 1024 * 1024
+MAX_FORWARD_ATTACHMENT_BYTES = 10 * 1024 * 1024  # decoded, all re-attached originals
+MAX_DRAFT_BYTES = 10 * 1024 * 1024
 MAX_FILENAME_CHARS = 200
 DEFAULT_CONTENT_TYPE = "application/octet-stream"
 FORWARD_MARKER = "---------- Forwarded message ---------"
@@ -331,10 +331,25 @@ class StoredDraft:
     senders: list[str]  # the addr-specs in From and Sender (lower case)
 
 
-def _split_header(raw: bytes) -> tuple[bytes, bytes]:
-    """(header block without its blank line, body) of a CRLF message."""
-    end = raw.find(b"\r\n\r\n")
-    return (raw[:end], raw[end + 4 :]) if end != -1 else (raw.rstrip(b"\r\n"), b"")
+# A message is a header block, a blank line, then the body. The body of a large message is
+# tens of MB, so the functions below find the header end, rework only the header and pass
+# the body on as a view: one message never holds more than one copy of its body.
+#
+# The first blank line: two line endings in a row, where a line ending is CRLF, a bare LF
+# or a bare CR (a CR followed by LF is always one CRLF, as `_EOL` splits them).
+_BLANK_LINE = re.compile(rb"(?:\r\n|\n|\r(?!\n))(?:\r\n|\n|\r(?!\n))")
+_CRLF_BLANK_LINE = b"\r\n\r\n"
+_BARE_EOL = re.compile(rb"\r(?!\n)|(?<!\r)\n")
+
+
+def _header_end(raw: bytes, blank_line: re.Pattern[bytes] | None = None) -> tuple[int, int]:
+    """(end of the header block, start of the body); (len, len) with no blank line. The
+    default looks for CRLF CRLF only (a message already in CRLF form)."""
+    if blank_line is None:
+        end = raw.find(_CRLF_BLANK_LINE)
+        return (end, end + 4) if end != -1 else (len(raw), len(raw))
+    m = blank_line.search(raw)
+    return m.span() if m else (len(raw), len(raw))
 
 
 def _split_fields(header: bytes) -> list[tuple[str, bytes]]:
@@ -352,18 +367,20 @@ def _split_fields(header: bytes) -> list[tuple[str, bytes]]:
     return fields
 
 
-def _join(lines: Iterable[bytes], body: bytes) -> bytes:
-    return b"\r\n".join(lines) + b"\r\n\r\n" + body
+def _header_block(lines: Iterable[bytes]) -> bytes:
+    """Header field lines -> the header block, with its terminating blank line."""
+    return b"\r\n".join(lines) + _CRLF_BLANK_LINE
 
 
-def without_bcc(raw: bytes) -> bytes:
-    """The message as it is transmitted: every Bcc header field removed, nothing else
-    touched (the recipients in Bcc get it through the SMTP envelope only)."""
-    header, body = _split_header(raw)
-    fields = _split_fields(header)
-    if not any(name == "bcc" for name, _ in fields):
-        return raw
-    return _join((line for name, line in fields if name != "bcc"), body)
+def without_bcc(raw: bytes) -> tuple[bytes, memoryview]:
+    """The message as it is transmitted, as (header block with its blank line, a view of
+    the body): every Bcc header field removed, nothing else touched (the recipients in Bcc
+    get it through the SMTP envelope only). The body is not copied; `raw` must be CRLF,
+    as `prepare_stored_draft` and the email generator make it."""
+    end, body_start = _header_end(raw)
+    body = memoryview(raw)[body_start:]
+    fields = _split_fields(raw[:end])
+    return _header_block(line for name, line in fields if name != "bcc"), body
 
 
 def prepare_stored_draft(
@@ -373,12 +390,17 @@ def prepare_stored_draft(
     set to now and a missing Message-ID is added. Bcc stays in this copy (filed in Sent);
     `without_bcc` strips it for transmission.
 
-    Every line ending (CRLF, a bare LF or a bare CR) becomes CRLF first, so the header parse
-    that finds the recipients and the field split that removes Bcc see the same lines (the
-    parser also breaks lines at a bare CR, `_split_fields` only at CRLF)."""
-    raw = _EOL.sub(b"\r\n", raw)
-    header, body = _split_header(raw)
-    parsed = BytesHeaderParser(policy=policy.default).parsebytes(header + b"\r\n\r\n")
+    Every line ending (CRLF, a bare LF or a bare CR) becomes CRLF, so the header parse that
+    finds the recipients and the field split that removes Bcc see the same lines (the parser
+    also breaks lines at a bare CR, `_split_fields` only at CRLF). The header block is
+    rewritten; the body is copied once into the result, and normalised only when it has a
+    bare LF or CR (an IMAP server returns CRLF, so that is rare)."""
+    end, body_start = _header_end(raw, _BLANK_LINE)
+    header = _EOL.sub(b"\r\n", raw[:end]).rstrip(b"\r\n")
+    body: bytes | memoryview = memoryview(raw)[body_start:]
+    if _BARE_EOL.search(body):
+        body = _EOL.sub(b"\r\n", body)
+    parsed = BytesHeaderParser(policy=policy.default).parsebytes(header + _CRLF_BLANK_LINE)
 
     def values(name: str) -> list[str]:
         out = []
@@ -404,7 +426,7 @@ def prepare_stored_draft(
         lines.append(f"Message-ID: {message_id}".encode())
     lines += [line for name, line in _split_fields(header) if name != "date"]
     return StoredDraft(
-        sent_copy=_join(lines, body),
+        sent_copy=b"".join((_header_block(lines), body)),
         recipients=recipients,
         message_id=message_id,
         senders=[s for s in senders if s],

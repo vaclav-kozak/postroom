@@ -127,6 +127,8 @@ Postroom is its own authorization server, so no third party is involved in grant
   if present) is one of the account's own addresses, so a message planted in Drafts by
   someone else cannot be sent as is. Concurrent calls for one draft send it once.
 - Inline attachments on `send_email` are limited to 2 MiB in total (decoded).
+  `forward_email` re-attaches at most 10 MiB, and `send_draft` sends drafts of up to
+  10 MiB.
 - Recipients, subjects and file names are validated and length-limited; header values
   cannot carry line breaks. `Bcc` is removed from the copy handed to the SMTP server.
 - The tools tell clients to send only what the owner asked for and to treat email content
@@ -149,7 +151,8 @@ Postroom runs comfortably in a 256 MiB container, including with hostile input:
   endpoints accept at most 16 KiB. The bundled Caddy and the nginx example allow 4 MB on
   `/mcp` and 1 MB everywhere else.
 - Sending a large message, like reading one, runs under the same one-at-a-time gate for
-  memory-heavy work.
+  memory-heavy work. Outgoing mail is capped at 10 MiB (see above), and a message is sent
+  over SMTP and filed in Sent without further copies of its body.
 
 The compose files run the container read-only, as a non-root user, with all capabilities
 dropped, `no-new-privileges`, a 256 MB memory limit and a process limit.

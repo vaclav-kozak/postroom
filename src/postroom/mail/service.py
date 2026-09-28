@@ -642,6 +642,11 @@ def _forward_files(items) -> list[OutgoingFile]:
     return files
 
 
+DRAFT_TOO_BIG = (
+    f"the draft is larger than {MAX_DRAFT_BYTES // (1024 * 1024)} MiB and cannot be sent"
+)
+
+
 def _too_big_to_forward(total: int) -> ValueError:
     mib = MAX_FORWARD_ATTACHMENT_BYTES // (1024 * 1024)
     return ValueError(
@@ -1346,11 +1351,11 @@ class MailService:
                     )
                 size = fetched[uid].get(b"RFC822.SIZE") or 0
                 if size > MAX_DRAFT_BYTES:
-                    raise ValueError("the draft is larger than 25 MiB and cannot be sent")
+                    raise ValueError(DRAFT_TOO_BIG)
                 with _heavy_if(size > HEAVY_MESSAGE_BYTES):
                     raw = c.fetch([uid], [FETCH_BODY])[uid][RESP_BODY]
                     if len(raw) > MAX_DRAFT_BYTES + 1024 * 1024:  # far over RFC822.SIZE
-                        raise ValueError("the draft is larger than 25 MiB and cannot be sent")
+                        raise ValueError(DRAFT_TOO_BIG)
                     return name, prepare_stored_draft(raw, account.email)
 
         draft_folder, draft = await self._run(read)

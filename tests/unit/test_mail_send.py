@@ -176,7 +176,8 @@ class FakeSmtp:
             time.sleep(self.delay)
         if self.error is not None:
             raise self.error
-        self.sent.append((email, sender, list(recipients), raw))
+        wire = raw if isinstance(raw, bytes) else b"".join(raw)  # (header, body view)
+        self.sent.append((email, sender, list(recipients), wire))
         return SendOutcome(refused=dict(self.refused))
 
 
@@ -609,7 +610,7 @@ async def test_send_draft_refuses_a_foreign_from_even_with_the_flag(repo, accoun
 async def test_send_draft_size_cap(repo, accounts, monkeypatch):
     monkeypatch.setattr(service_module, "MAX_DRAFT_BYTES", 100)
     smtp = FakeSmtp()
-    with pytest.raises(ValueError, match="larger than 25 MiB"):
+    with pytest.raises(ValueError, match="larger than 10 MiB"):
         await service(repo, {A: drafts()}, smtp).send_draft(A, 9)
     assert smtp.sent == []
 

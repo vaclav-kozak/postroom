@@ -600,3 +600,30 @@ def test_gmail_app_password_refused_pauses_like_any_password(repo, gmail_app_pas
     with pytest.raises(SmtpUnavailable):
         s.send(APP, APP, ["b@example.org"], b"x\r\n")
     assert len([c for i in FakeSMTP.instances for c in i.calls if c[0] == "auth"]) == 1
+
+
+@pytest.mark.parametrize(
+    "chunks",
+    [
+        [b"H: v\r\n\r\n", memoryview(b".first\r\nmid\r\n.dot\r\nend\r\n")],
+        [b"H: v\r\n\r\n.", b"first\r\nmid\r\n", b".dot\r\nend\r\n"],
+        [b"H: v\r\n\r\n.first\r", b"\nmid\r\n.dot\r\nend\r", b"\n", b""],
+    ],
+)
+def test_data_streams_chunks_like_one_message(chunks):
+    s = smtp_session()
+    SmtpConnector.transmit(s, A, ["b@example.org"], chunks)
+    whole = b"".join(chunks)
+    assert s.calls[-1] == ("data", smtplib._quote_periods(whole) + b".\r\n")
+
+
+def test_chunks_are_checked_for_8bit_and_size_as_a_whole():
+    s = smtp_session()
+    SmtpConnector.transmit(
+        s, A, ["b@example.org"], [b"Subject: x\r\n\r\n", memoryview("ž".encode())]
+    )
+    assert s.calls[0] == ("mail", A, ["BODY=8BITMIME"])
+    s = smtp_session()
+    s.esmtp_features["size"] = "100"
+    with pytest.raises(SmtpRejected, match=r"message \(120 bytes\)"):
+        SmtpConnector.transmit(s, A, ["b@example.org"], [b"x" * 60, memoryview(b"y" * 60)])

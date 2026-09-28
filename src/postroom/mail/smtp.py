@@ -26,9 +26,10 @@ SMTP reply code and text, never the password or the token.
 """
 
 import base64
+import re
 import smtplib
 import ssl
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass, field
 
 from postroom.accounts import Account, AccountRepo, AccountStatus, SmtpStatus
@@ -114,23 +115,40 @@ def _auth_mechanisms(smtp) -> list[str]:
     return str(features.get("auth", "")).upper().split()
 
 
-def _send_data(smtp, raw: bytes) -> tuple[int, bytes]:
+# The message to send: one bytes object, or its pieces in order (e.g. a rebuilt header and a
+# view of the body), so the caller never joins them into another whole-message copy.
+Wire = bytes | Sequence[bytes | memoryview]
+_NON_ASCII = re.compile(rb"[^\x00-\x7f]")
+_LF_DOT = re.compile(rb"\n\.")
+
+
+def _chunks(raw: Wire) -> list[bytes | memoryview]:
+    return [raw] if isinstance(raw, bytes | bytearray | memoryview) else list(raw)
+
+
+def _send_data(smtp, raw: Wire) -> tuple[int, bytes]:
     """DATA with `raw` (CRLF lines) streamed from the caller's bytes: lines that start with
     "." get a second one (RFC 5321 4.5.2), then the terminator. Same wire bytes and
     errors as `smtplib.SMTP.data()`, without its whole-message copies."""
     code, resp = smtp.docmd("DATA")
     if code != 354:
         raise smtplib.SMTPDataError(code, resp)
-    view = memoryview(raw)
-    start = 0
-    if raw.startswith(b"."):
-        smtp.send(b".")
-    while (i := raw.find(b"\n.", start)) != -1:
-        smtp.send(view[start : i + 1])
-        smtp.send(b".")
-        start = i + 1
-    smtp.send(view[start:])
-    smtp.send(b".\r\n" if raw.endswith(b"\r\n") else b"\r\n.\r\n")
+    line_start, tail = True, b""
+    for chunk in _chunks(raw):
+        if not len(chunk):
+            continue
+        view = memoryview(chunk)
+        if line_start and view[:1] == b".":
+            smtp.send(b".")
+        start = 0
+        for m in _LF_DOT.finditer(view):
+            smtp.send(view[start : m.start() + 1])
+            smtp.send(b".")
+            start = m.start() + 1
+        smtp.send(view[start:])
+        line_start = view[-1:] == b"\n"
+        tail = (tail + bytes(view[-2:]))[-2:]
+    smtp.send(b".\r\n" if tail == b"\r\n" else b"\r\n.\r\n")
     return smtp.getreply()
 
 
@@ -288,20 +306,21 @@ class SmtpConnector:
         _quit_quietly(self.connect(account, secret))
 
     @staticmethod
-    def transmit(smtp, sender: str, recipients: list[str], raw: bytes) -> SendOutcome:
+    def transmit(smtp, sender: str, recipients: list[str], raw: Wire) -> SendOutcome:
         """MAIL FROM, RCPT TO each recipient, DATA. `raw` goes out exactly as given (CRLF)."""
         options = []
-        if not raw.isascii() and _has_extn(smtp, "8bitmime"):
+        chunks = _chunks(raw)
+        size = sum(len(c) for c in chunks)
+        if any(_NON_ASCII.search(c) for c in chunks) and _has_extn(smtp, "8bitmime"):
             options.append("BODY=8BITMIME")
         if not all(a.isascii() for a in (sender, *recipients)):
             if not _has_extn(smtp, "smtputf8"):
                 raise SmtpRejected("the SMTP server does not accept non-ASCII email addresses")
             options.append("SMTPUTF8")
         limit = smtp.esmtp_features.get("size", "") if hasattr(smtp, "esmtp_features") else ""
-        if limit.isdigit() and int(limit) and len(raw) > int(limit):
+        if limit.isdigit() and int(limit) and size > int(limit):
             raise SmtpRejected(
-                f"the message ({len(raw)} bytes) is larger than the SMTP server accepts "
-                f"({limit} bytes)"
+                f"the message ({size} bytes) is larger than the SMTP server accepts ({limit} bytes)"
             )
         try:
             code, resp = smtp.mail(sender, options)
@@ -328,7 +347,7 @@ class SmtpConnector:
 
         # From here on the server may accept the message even if we never hear back.
         try:
-            code, resp = _send_data(smtp, raw)
+            code, resp = _send_data(smtp, chunks)
         except smtplib.SMTPDataError as e:  # DATA itself refused (no 354): nothing sent
             raise SmtpRejected(f"the SMTP server rejected the message: {_safe(e)}") from e
         except (OSError, smtplib.SMTPException) as e:
@@ -402,7 +421,7 @@ class SmtpSender:
             return str(e)
         return None
 
-    def send(self, email: str, sender: str, recipients: list[str], raw: bytes) -> SendOutcome:
+    def send(self, email: str, sender: str, recipients: list[str], raw: Wire) -> SendOutcome:
         """Send `raw` once. Raises `SmtpError` subclasses; never retries."""
         smtp = self._login(email, manual=False)
         try:

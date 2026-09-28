@@ -562,7 +562,7 @@ def register_mail_tools(mcp: FastMCP, repo: AccountRepo, mail: MailService) -> N
 
         account, folder and uid identify the email, as search_emails returns them. to / cc
         / bcc: email addresses. body: your text above the forwarded message. The original's
-        attachments are included (at most 20 MiB in total) unless include_attachments=false.
+        attachments are included (at most 10 MiB in total) unless include_attachments=false.
         Needs mail access "full" and an outgoing server (capability "mail.send").
         Returns the same fields as send_email; the same duplicate rule and allow_duplicate
         apply.

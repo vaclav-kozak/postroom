@@ -159,7 +159,7 @@ Notes:
   offset (`2026-10-05T09:00:00+02:00`) to be exact.
 - Limits: `search_emails` returns 1-100 results per page; the batch tools take up to 500
   emails; `send_email` attachments total at most **2 MiB** (decoded); `forward_email`
-  re-attaches at most 20 MiB; `send_draft` sends drafts of up to 25 MiB. For files larger
+  re-attaches at most 10 MiB; `send_draft` sends drafts of up to 10 MiB. For files larger
   than 2 MiB, forward an email that has them, or attach them to a draft yourself and let
   the client call `send_draft`.
 

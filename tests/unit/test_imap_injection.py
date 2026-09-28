@@ -1,10 +1,13 @@
 """CR/LF/NUL in an inline IMAP argument would end the command and inject new ones."""
 
 import contextlib
+import imaplib
+from datetime import UTC, datetime
 
 import pytest
 from imapclient import IMAPClient
 from imapclient.exceptions import IMAPClientError
+from imapclient.imapclient import datetime_to_INTERNALDATE, seq_to_parenstr
 
 from postroom.mail.imap import SafeIMAPClient, UnsafeImapArgument
 
@@ -88,3 +91,59 @@ def test_plain_searches_still_work():
         c.search(["FROM", "jan@example.com", "SUBJECT", "faktura 2026"])
     assert c._imap.sent.startswith(b"K001 UID SEARCH FROM")
     assert c._imap.sent.count(b"\r\n") == 1
+
+
+class _AppendStub:
+    """The two imaplib.IMAP4 members that APPEND uses."""
+
+    def __init__(self):
+        self.literal = None
+        self.calls = []
+
+    def _simple_command(self, name, *args):
+        self.calls.append((name, args, self.literal))
+        self.literal = None
+        return "OK", [b"[APPENDUID 1 7] done"]
+
+
+def _append_client():
+    c = _client()
+    c._imap = _AppendStub()
+    return c
+
+
+def test_append_of_a_crlf_message_sends_it_as_given_without_a_copy():
+    msg = b"From: a@example.com\r\nSubject: x\r\n\r\nbody\r\n.line\r\n"
+    when = datetime(2026, 9, 28, 12, 0, tzinfo=UTC)
+    c = _append_client()
+    assert c.append("Sent", msg, flags=(b"\\Seen",), msg_time=when) == b"[APPENDUID 1 7] done"
+    (name, args, literal) = c._imap.calls[0]
+    assert literal is msg  # no re.sub copy
+
+    # The same command imaplib's own append would issue.
+    stock = _AppendStub()
+    imaplib.IMAP4.append(stock, *_stock_args(c, "Sent", (b"\\Seen",), when), msg)
+    assert (name, args) == stock.calls[0][:2]
+    assert stock.calls[0][2] == msg
+
+
+def _stock_args(c, folder, flags, when):
+    return (
+        c._normalise_folder(folder),
+        seq_to_parenstr(flags),
+        f'"{datetime_to_INTERNALDATE(when)}"',
+    )
+
+
+def test_append_of_a_message_with_bare_line_endings_is_normalised_by_imaplib():
+    c = _append_client()
+    c._imap.append = lambda *a: imaplib.IMAP4.append(c._imap, *a)
+    c.append("Sent", b"Subject: x\n\nbody\rmore\n")
+    assert c._imap.calls[0][2] == b"Subject: x\r\n\r\nbody\r\nmore\r\n"
+
+
+def test_append_refuses_an_unsafe_folder_name():
+    c = _append_client()
+    with pytest.raises(UnsafeImapArgument):
+        c.append(PAYLOAD, b"x\r\n")
+    assert c._imap.calls == []

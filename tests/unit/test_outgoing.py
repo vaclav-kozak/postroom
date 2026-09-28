@@ -275,7 +275,7 @@ def build(**kw):
 def test_sent_copy_keeps_bcc_and_the_wire_copy_does_not():
     raw, msgid = build()
     assert b"\r\nBcc: secret@example.org\r\n" in raw
-    wire = without_bcc(raw)
+    wire = b"".join(without_bcc(raw))
     assert b"bcc" not in wire.lower().split(b"\r\n\r\n", 1)[0]
     assert b"secret@example.org" not in wire
     assert raw.replace(b"Bcc: secret@example.org\r\n", b"") == wire
@@ -288,11 +288,17 @@ def test_without_bcc_removes_folded_and_repeated_fields_only_in_the_header():
         b"From: a@example.org\r\nBcc: x@example.org,\r\n y@example.org\r\n"
         b"To: b@example.org\r\nbcc: z@example.org\r\n\r\nBcc: stays in the body\r\n"
     )
-    assert without_bcc(raw) == (
-        b"From: a@example.org\r\nTo: b@example.org\r\n\r\nBcc: stays in the body\r\n"
-    )
+    header, body = without_bcc(raw)
+    assert header == b"From: a@example.org\r\nTo: b@example.org\r\n\r\n"
+    assert body == b"Bcc: stays in the body\r\n"
     no_bcc = b"From: a@example.org\r\n\r\nbody"
-    assert without_bcc(no_bcc) is no_bcc
+    assert b"".join(without_bcc(no_bcc)) == no_bcc
+
+
+def test_without_bcc_does_not_copy_the_body():
+    raw = b"From: a@example.org\r\nBcc: x@example.org\r\n\r\n" + b"x" * 1000
+    _header, body = without_bcc(raw)
+    assert isinstance(body, memoryview) and body.obj is raw
 
 
 def test_attachments_are_built_as_parts():
@@ -355,7 +361,7 @@ def test_prepare_stored_draft():
     assert d.sent_copy.startswith(b"Date: Mon, 28 Sep 2026 12:00:00 +0000\r\n")
     assert d.sent_copy.count(b"Date:") == 1
     assert b"Bcc: hidden@example.org" in d.sent_copy  # kept for the Sent copy
-    assert b"hidden@example.org" not in without_bcc(d.sent_copy)
+    assert b"hidden@example.org" not in b"".join(without_bcc(d.sent_copy))
     assert d.sent_copy.endswith(b"\r\n\r\nHello\r\n")
 
 
@@ -378,7 +384,23 @@ def test_stored_draft_bare_cr_cannot_hide_a_bcc_line():
     assert b"\r" not in d.sent_copy.replace(b"\r\n", b"")
     assert b"\n" not in d.sent_copy.replace(b"\r\n", b"")
     assert "hidden@example.org" in d.recipients.envelope
-    assert b"hidden@example.org" not in without_bcc(d.sent_copy)
+    assert b"hidden@example.org" not in b"".join(without_bcc(d.sent_copy))
+
+
+def test_stored_draft_body_is_kept_byte_for_byte():
+    body = b"line one\r\n.dot line\r\n\r\nBcc: not a header\r\n\x80\xff"
+    d = prepare_stored_draft(DRAFT.split(b"\r\n\r\n")[0] + b"\r\n\r\n" + body, ME)
+    assert d.sent_copy.endswith(b"\r\n\r\n" + body)
+    header, wire_body = without_bcc(d.sent_copy)
+    assert wire_body == body and b"hidden@example.org" not in header
+
+
+@pytest.mark.parametrize("blank", [b"\n\n", b"\r\r", b"\r\n\n", b"\n\r\n", b"\r\r\n"])
+def test_stored_draft_header_ends_at_the_first_blank_line_of_any_form(blank):
+    raw = b"From: user@example.com\nTo: bob@example.org" + blank + b"Bcc: body@example.org\r\n"
+    d = prepare_stored_draft(raw, ME)
+    assert d.recipients.envelope == ["bob@example.org"]
+    assert d.sent_copy.endswith(b"\r\n\r\nBcc: body@example.org\r\n")
 
 
 def test_stored_draft_senders_are_its_from_and_sender():

@@ -17,7 +17,13 @@ from contextlib import contextmanager
 
 from imapclient import IMAPClient
 from imapclient.exceptions import IMAPClientAbortError, IMAPClientError, LoginError
-from imapclient.imapclient import SocketTimeout, _is8bit
+from imapclient.imapclient import (
+    SocketTimeout,
+    _is8bit,
+    datetime_to_INTERNALDATE,
+    seq_to_parenstr,
+    to_bytes,
+)
 
 from postroom.accounts import Account, AccountRepo, AccountStatus
 from postroom.login_locks import LoginLocks
@@ -31,6 +37,7 @@ SUMMARY_FIELDS = ["ENVELOPE", "INTERNALDATE", "FLAGS", "RFC822.SIZE", "BODYSTRUC
 _BLOCKED_STATUSES = (AccountStatus.NEEDS_RECONNECT, AccountStatus.NEEDS_GOOGLE_CONNECT)
 
 _UNSAFE_ARG = re.compile(rb"[\r\n\x00]")
+_BARE_EOL = re.compile(rb"\r(?!\n)|(?<!\r)\n")
 
 # How long a connect waits for the account's login lock (held by an in-flight
 # CalDAV/CardDAV call) before giving up.
@@ -67,6 +74,24 @@ class SafeIMAPClient(IMAPClient):
         if _UNSAFE_ARG.search(raw):
             raise UnsafeImapArgument()
         return super()._normalise_folder(folder_name)
+
+    def append(self, folder, msg, flags=(), msg_time=None):
+        """`IMAPClient.append`, without imaplib's line-ending pass when `msg` is already
+        CRLF. imaplib runs `re.sub` over the whole message to turn every line ending into
+        CRLF, and for a large message that holds about five copies of it at once; a sent
+        email or a draft is CRLF already. A message with a bare CR or LF still goes
+        through imaplib, which fixes it."""
+        msg = to_bytes(msg)
+        if _BARE_EOL.search(msg):
+            return super().append(folder, msg, flags, msg_time)
+        mailbox = self._normalise_folder(folder)
+        flags = seq_to_parenstr(flags)
+        time_val = f'"{datetime_to_INTERNALDATE(msg_time)}"' if msg_time else None
+        # What imaplib.IMAP4.append does with these arguments, minus the `re.sub`.
+        self._imap.literal = msg
+        typ, data = self._imap._simple_command("APPEND", mailbox, flags, time_val)
+        self._checkok("append", typ, data)
+        return data[0]
 
 
 def is_safe_imap_value(value: str) -> bool:

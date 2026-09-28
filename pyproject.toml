@@ -1,0 +1,68 @@
+[project]
+name = "postroom"
+version = "0.1.0"
+description = "Self-hosted MCP server for all your mailboxes, calendars, tasks and contacts (IMAP, CalDAV/CardDAV, Google)"
+readme = "README.md"
+license = "Apache-2.0"
+authors = [{ name = "Václav Kozák" }]
+requires-python = ">=3.13"
+keywords = ["mcp", "model-context-protocol", "imap", "caldav", "carddav", "email", "calendar", "claude", "self-hosted"]
+classifiers = [
+  "Development Status :: 4 - Beta",
+  "Environment :: Web Environment",
+  "Intended Audience :: End Users/Desktop",
+  "Intended Audience :: System Administrators",
+  "Operating System :: OS Independent",
+  "Programming Language :: Python :: 3",
+  "Programming Language :: Python :: 3 :: Only",
+  "Programming Language :: Python :: 3.13",
+  "Topic :: Communications :: Email",
+  "Topic :: Communications :: Email :: Post-Office :: IMAP",
+  "Topic :: Office/Business :: Scheduling",
+]
+dependencies = [
+  "fastmcp>=4.0.10,<5",
+  "imapclient>=4.1,<5",
+  "httpx>=0.28",
+  "cryptography>=45",
+  "argon2-cffi>=23.1",
+  "jinja2>=3.1",
+  "itsdangerous>=2.2",
+  "python-multipart>=0.0.20",
+  "markdownify>=1.1",
+  "beautifulsoup4>=4.12",
+  "pypdf>=5",
+  "caldav>=3.3,<4",
+  "icalendar>=6",
+  "vobject>=0.9.9",
+  "pydantic-settings>=2.6",
+  "uvicorn>=0.34",
+]
+
+[project.scripts]
+postroom = "postroom.cli:main"
+
+[project.urls]
+Homepage = "https://github.com/vaclav-kozak/postroom"
+Issues = "https://github.com/vaclav-kozak/postroom/issues"
+
+[dependency-groups]
+dev = ["pytest>=8", "pytest-asyncio>=0.25", "respx>=0.22", "testcontainers>=4.9", "radicale>=3.3", "ruff>=0.8"]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/postroom"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+asyncio_mode = "auto"
+asyncio_default_fixture_loop_scope = "function"
+markers = ["integration: needs Docker/network services"]
+addopts = "-m 'not integration'"
+
+[tool.ruff]
+line-length = 100
+target-version = "py313"

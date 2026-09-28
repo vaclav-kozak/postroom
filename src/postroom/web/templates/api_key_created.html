@@ -1,0 +1,12 @@
+{% extends "base.html" %}
+{% block title %}API key created · Postroom{% endblock %}
+{% block content %}
+<section class="card narrow">
+  <h1>API key created</h1>
+  <p>Key <strong>{{ key_name }}</strong>:</p>
+  <code class="secret">{{ key }}</code>
+  <p class="warning">Copy it now — it is not stored and cannot be shown again.</p>
+  <p class="hint">Use it as <code>Authorization: Bearer &lt;key&gt;</code> against {{ mcp_url }}.</p>
+  <p><a href="/admin">Back to admin</a></p>
+</section>
+{% endblock %}

@@ -1,0 +1,40 @@
+{% extends "base.html" %}
+{% block title %}{% if account %}Edit account{% else %}Add IMAP account{% endif %} · Postroom{% endblock %}
+{% block content %}
+<section class="card narrow">
+  <h1>{% if account %}Edit {{ account.email }}{% else %}Add IMAP account{% endif %}</h1>
+  {% if error %}<p class="alert" role="alert">{{ error }}</p>{% endif %}
+  <form method="post" action="{% if account %}/admin/accounts/{{ account.id }}{% else %}/admin/accounts{% endif %}">
+    <input type="hidden" name="csrf" value="{{ csrf }}">
+    <label for="email">Email</label>
+    <input id="email" name="email" type="email" value="{{ f.email }}" required {% if account %}readonly{% endif %}>
+    <label for="display_name">Display name</label>
+    <input id="display_name" name="display_name" type="text" value="{{ f.display_name }}">
+    <label for="imap_host">IMAP server</label>
+    <input id="imap_host" name="imap_host" type="text" value="{{ f.imap_host }}" required>
+    <label for="imap_port">Port</label>
+    <input id="imap_port" name="imap_port" type="number" min="1" max="65535" value="{{ f.imap_port }}" required>
+    <label for="imap_security">Security</label>
+    <select id="imap_security" name="imap_security">
+      <option value="ssl" {% if f.imap_security == "ssl" %}selected{% endif %}>SSL/TLS</option>
+      <option value="starttls" {% if f.imap_security == "starttls" %}selected{% endif %}>STARTTLS</option>
+    </select>
+    <label for="imap_username">Username <span class="hint">(leave empty to use the email)</span></label>
+    <input id="imap_username" name="imap_username" type="text" value="{{ f.imap_username }}" autocomplete="off">
+    <label for="password">Password {% if account %}<span class="hint">(leave empty to keep)</span>{% endif %}</label>
+    <input id="password" name="password" type="password" value="" autocomplete="new-password" {% if not account %}required{% endif %}>
+    <label for="caldav_url">CalDAV URL <span class="hint">(optional)</span></label>
+    <input id="caldav_url" name="caldav_url" type="url" value="{{ f.caldav_url }}">
+    <label for="carddav_url">CardDAV URL <span class="hint">(optional)</span></label>
+    <input id="carddav_url" name="carddav_url" type="url" value="{{ f.carddav_url }}">
+    <p class="hint">Fill these in to use calendars, tasks and contacts. For SOGo/mailcow servers
+      both are usually <code>https://&lt;mail-host&gt;/SOGo/dav/&lt;email&gt;/</code>. Leave them
+      empty for mail only. Google accounts need no DAV URLs: use "Connect Google account".</p>
+    <p class="hint">A test login runs before anything is saved.</p>
+    <div class="actions">
+      <button type="submit" class="primary">{% if account %}Test and save{% else %}Test and add{% endif %}</button>
+      <a href="/admin">Cancel</a>
+    </div>
+  </form>
+</section>
+{% endblock %}

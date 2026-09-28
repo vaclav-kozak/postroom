@@ -1,0 +1,25 @@
+{% extends "base.html" %}
+{% block title %}Authorize access · Postroom{% endblock %}
+{% block content %}
+<section class="card narrow">
+  <h1>Allow access to your mailboxes?</h1>
+  <p>An application is asking for access to this server. After approval it can read
+  every connected mailbox and save drafts.</p>
+  <p class="label">Access will be sent to</p>
+  <p class="redirect-host"><strong>{{ redirect_host }}</strong></p>
+  <dl class="details">
+    <dt>Application name</dt><dd>{{ client_name or "(unnamed application)" }}</dd>
+    <dt>Client ID</dt><dd><code>{{ client_id }}</code></dd>
+    <dt>Redirect URI</dt><dd><code>{{ redirect_uri }}</code></dd>
+    <dt>Requested scope</dt><dd>{{ scopes }}</dd>
+  </dl>
+  <p class="warning">Allow only if you started this yourself just now (for example by adding
+  the connector in Claude) and you recognise <strong>{{ redirect_host }}</strong>.</p>
+  <form method="post" action="/consent" class="actions">
+    <input type="hidden" name="csrf" value="{{ csrf }}">
+    <input type="hidden" name="txn" value="{{ txn }}">
+    <button type="submit" name="action" value="allow" class="primary">Allow</button>
+    <button type="submit" name="action" value="deny">Deny</button>
+  </form>
+</section>
+{% endblock %}

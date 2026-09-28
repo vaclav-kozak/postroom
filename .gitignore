@@ -1,0 +1,29 @@
+# Secrets / owner exports — never commit
+*.xml
+!tests/fixtures/*.xml
+*passphrase*
+emclient-qr-export.png
+.env
+*.env
+!.env.example
+secrets/
+data/
+
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+*.egg-info/
+dist/
+build/
+.coverage
+htmlcov/
+*:Zone.Identifier
+
+# Agent workspaces
+.superpowers/
+.claude/
+.worktrees/

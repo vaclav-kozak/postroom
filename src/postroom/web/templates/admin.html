@@ -1,0 +1,128 @@
+{% extends "base.html" %}
+{% block title %}Admin · Postroom{% endblock %}
+{% block content %}
+{% if flash %}<p class="flash" role="status">{{ flash }}</p>{% endif %}
+
+<section class="card">
+  <h1>Connection</h1>
+  <p>MCP server URL (add it as a custom connector in Claude):</p>
+  <code class="secret">{{ mcp_url }}</code>
+</section>
+
+<h2>Accounts</h2>
+<div class="actions">
+  <a href="/admin/accounts/new"><button type="button">Add IMAP account</button></a>
+  {% if google_enabled %}<a href="/admin/google/connect"><button type="button">Connect Google account</button></a>{% endif %}
+</div>
+<table>
+  <thead>
+    <tr><th>Email</th><th>Name</th><th>Provider</th><th>Capabilities</th><th>Status</th>
+      <th>Last OK</th><th>Last error</th><th>Actions</th></tr>
+  </thead>
+  <tbody>
+  {% for a in accounts %}
+    <tr>
+      <td>{{ a.email }}</td>
+      <td>{{ a.display_name or "" }}</td>
+      <td>{{ a.provider.value }}</td>
+      <td>{{ a.capabilities | join(", ") }}</td>
+      <td>
+        {% if a.enabled %}<span class="badge badge-{{ a.status.value }}">{{ a.status.value | replace("_", " ") }}</span>
+        {% else %}<span class="badge badge-disabled">disabled</span>{% endif %}
+      </td>
+      <td>{{ a.last_ok_at | ts }}</td>
+      <td>{{ a.last_error or "" }}</td>
+      <td>
+        <div class="row-actions">
+          <form method="post" action="/admin/accounts/{{ a.id }}/test" class="inline">
+            <input type="hidden" name="csrf" value="{{ csrf }}">
+            <button type="submit">Test now</button>
+          </form>
+          {% if a.provider.value == "google" %}
+            {% if google_enabled %}<a href="/admin/google/connect?account_id={{ a.id }}"><button type="button">Reconnect</button></a>{% endif %}
+          {% else %}
+            <a href="/admin/accounts/{{ a.id }}/edit"><button type="button">Edit</button></a>
+          {% endif %}
+          <form method="post" action="/admin/accounts/{{ a.id }}/toggle" class="inline">
+            <input type="hidden" name="csrf" value="{{ csrf }}">
+            <button type="submit">{% if a.enabled %}Disable{% else %}Enable{% endif %}</button>
+          </form>
+        </div>
+        <details class="remove">
+          <summary>Remove</summary>
+          <form method="post" action="/admin/accounts/{{ a.id }}/delete">
+            <input type="hidden" name="csrf" value="{{ csrf }}">
+            <label for="confirm-{{ a.id }}">Type {{ a.email }} to confirm</label>
+            <input id="confirm-{{ a.id }}" name="confirm" type="text" autocomplete="off" required>
+            <button type="submit" class="danger">Remove account</button>
+          </form>
+        </details>
+      </td>
+    </tr>
+  {% else %}
+    <tr><td colspan="8">No accounts yet.</td></tr>
+  {% endfor %}
+  </tbody>
+</table>
+
+<h2>Authorized OAuth clients</h2>
+<table>
+  <thead><tr><th>Name</th><th>Redirect hosts</th><th>Created</th><th>Last used</th><th>Active tokens</th><th></th></tr></thead>
+  <tbody>
+  {% for c in clients %}
+    <tr>
+      <td>{{ c.client_name or "(unnamed)" }}<br><code class="hint">{{ c.client_id }}</code></td>
+      <td>{{ c.redirect_hosts | join(", ") }}</td>
+      <td>{{ c.created_at | ts }}</td>
+      <td>{{ c.last_used_at | ts }}</td>
+      <td>{{ c.active_tokens }}</td>
+      <td>
+        <form method="post" action="/admin/clients/{{ c.client_id | urlencode }}/revoke" class="inline">
+          <input type="hidden" name="csrf" value="{{ csrf }}">
+          <button type="submit" class="danger">Revoke</button>
+        </form>
+      </td>
+    </tr>
+  {% else %}
+    <tr><td colspan="6">No clients registered.</td></tr>
+  {% endfor %}
+  </tbody>
+</table>
+
+<h2>API keys</h2>
+<table>
+  <thead><tr><th>Name</th><th>Prefix</th><th>Created</th><th>Last used</th><th></th></tr></thead>
+  <tbody>
+  {% for k in api_keys %}
+    <tr>
+      <td>{{ k.name }}</td>
+      <td><code>{{ k.prefix }}…</code></td>
+      <td>{{ k.created_at | ts }}</td>
+      <td>{{ k.last_used_at | ts }}</td>
+      <td>
+        <form method="post" action="/admin/api-keys/{{ k.id }}/revoke" class="inline">
+          <input type="hidden" name="csrf" value="{{ csrf }}">
+          <button type="submit" class="danger">Revoke</button>
+        </form>
+      </td>
+    </tr>
+  {% else %}
+    <tr><td colspan="5">No API keys.</td></tr>
+  {% endfor %}
+  </tbody>
+</table>
+<form method="post" action="/admin/api-keys" class="actions">
+  <input type="hidden" name="csrf" value="{{ csrf }}">
+  <label for="key-name" class="hint">New key name</label>
+  <input id="key-name" name="name" type="text" maxlength="60" required>
+  <button type="submit" class="primary">Create API key</button>
+</form>
+
+<details class="advanced">
+  <summary>Advanced</summary>
+  <p class="hint">Optional: bulk-import IMAP accounts from an eM Client export. The first line of
+    the input is the export passphrase, the rest is the XML. See
+    <code>docs/advanced/emclient-import.md</code>.</p>
+  <code class="secret">{{ import_command }}</code>
+</details>
+{% endblock %}

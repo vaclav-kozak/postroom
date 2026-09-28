@@ -1,5 +1,6 @@
 import ssl
 import threading
+from typing import ClassVar
 
 import pytest
 
@@ -320,6 +321,57 @@ def test_google_token_error_sets_error_and_opens_no_socket(repo, gmail, no_socke
     assert no_sockets == []
     acc = repo.get(gmail)
     assert acc.status == AccountStatus.ERROR and "HTTP 503" in acc.last_error
+
+
+class LoginRecorder:
+    logins: ClassVar[list[tuple]] = []
+
+    def __init__(self, *args, **kwargs):
+        pass
+
+    def login(self, user, password):
+        LoginRecorder.logins.append(("login", user, password))
+
+    def oauth2_login(self, user, token):
+        LoginRecorder.logins.append(("oauth2_login", user, token))
+
+    def noop(self):
+        pass
+
+    def logout(self):
+        pass
+
+
+def _no_google_token(email):
+    raise AssertionError("an app-password account must never ask for a Google token")
+
+
+def test_gmail_app_password_account_logs_in_with_login(repo, monkeypatch):
+    monkeypatch.setattr("postroom.mail.imap.SafeIMAPClient", LoginRecorder)
+    monkeypatch.setattr(LoginRecorder, "logins", [])
+    repo.upsert(
+        email="p@gmail.com",
+        provider=Provider.IMAP,
+        imap_host="imap.gmail.com",
+        imap_port=993,
+        imap_security="ssl",
+        secret="abcd efgh ijkl mnop",
+        status=AccountStatus.CONNECTED,
+    )
+    pool = ImapPool(repo, ImapConnector(google_token=_no_google_token))
+    with pool.session("p@gmail.com") as c:
+        c.noop()
+    assert LoginRecorder.logins == [("login", "p@gmail.com", "abcd efgh ijkl mnop")]
+    assert repo.get("p@gmail.com").status == AccountStatus.CONNECTED
+
+
+def test_google_oauth_account_logs_in_with_xoauth2(repo, gmail, monkeypatch):
+    monkeypatch.setattr("postroom.mail.imap.SafeIMAPClient", LoginRecorder)
+    monkeypatch.setattr(LoginRecorder, "logins", [])
+    pool = ImapPool(repo, ImapConnector(google_token=lambda email: "ya29.token"))
+    with pool.session(gmail) as c:
+        c.noop()
+    assert LoginRecorder.logins == [("oauth2_login", gmail, "ya29.token")]
 
 
 def test_google_token_auth_failure_trips_breaker_without_socket(repo, gmail, no_sockets):

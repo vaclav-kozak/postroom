@@ -151,7 +151,7 @@ class ImapConnector:
     def connect(self, account: Account, secret: str | None) -> IMAPClient:
         # Credentials first: a token failure must never leave an opened socket behind.
         token = None
-        if account.is_gmail:
+        if account.uses_google_oauth:
             if self.google_token is None:
                 raise AuthFailed("no google token source configured")
             try:

@@ -543,3 +543,60 @@ def test_sends_on_different_threads_share_nothing(repo, accounts):
     for t in threads:
         t.join()
     assert errors == [] and len(FakeSMTP.instances) == 4
+
+
+# -- Gmail with an app password (an IMAP account on imap.gmail.com) ----------------------------
+
+APP = "app@gmail.com"
+APP_PASSWORD = "abcd efgh ijkl mnop"
+
+
+@pytest.fixture
+def gmail_app_password(repo):
+    repo.upsert(
+        email=APP,
+        provider=Provider.IMAP,
+        imap_host="imap.gmail.com",
+        imap_port=993,
+        imap_security="ssl",
+        secret=APP_PASSWORD,
+        status=AccountStatus.CONNECTED,
+        smtp_host="smtp.gmail.com",
+        smtp_port=465,
+        smtp_security="ssl",
+    )
+    return repo.get(APP)
+
+
+def _no_google_token(email):
+    raise AssertionError("an app-password account must never ask for a Google token")
+
+
+def test_gmail_app_password_logs_in_with_auth_plain(repo, gmail_app_password):
+    a = gmail_app_password
+    assert a.is_gmail and not a.uses_google_oauth
+    connector(google_token=_no_google_token).check(a, APP_PASSWORD)
+    s = last()
+    assert isinstance(s, FakeSMTPSSL) and (s.host, s.port) == ("smtp.gmail.com", 465)
+    assert s.names() == ["ehlo", "auth", "quit"]
+    assert s.calls[1] == ("auth", "PLAIN", f"\0{APP}\0{APP_PASSWORD}".encode())
+
+
+def test_gmail_app_password_sender_uses_the_stored_password(repo, gmail_app_password):
+    s = SmtpSender(repo, connector(google_token=_no_google_token), LoginLocks())
+    assert s.check(APP) is None
+    assert last().calls[1] == ("auth", "PLAIN", f"\0{APP}\0{APP_PASSWORD}".encode())
+
+
+def test_gmail_app_password_refused_pauses_like_any_password(repo, gmail_app_password):
+    FakeSMTPSSL.auth_reply = (535, b"5.7.8 Username and Password not accepted")
+    dropped = []
+    c = connector(google_token=_no_google_token, google_invalidate=dropped.append)
+    s = SmtpSender(repo, c, LoginLocks())
+    with pytest.raises(SmtpAuthFailed):
+        s.send(APP, APP, ["b@example.org"], b"x\r\n")
+    assert repo.get(APP).smtp_status == SmtpStatus.AUTH_FAILED
+    assert dropped == []  # no Google token to refresh
+    with pytest.raises(SmtpUnavailable):
+        s.send(APP, APP, ["b@example.org"], b"x\r\n")
+    assert len([c for i in FakeSMTP.instances for c in i.calls if c[0] == "auth"]) == 1

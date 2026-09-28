@@ -108,10 +108,18 @@ class Account:
     smtp_checked_at: int | None = None
 
     @property
+    def uses_google_oauth(self) -> bool:
+        """Whether IMAP and SMTP log in with XOAUTH2 and a Google access token (the stored
+        secret is then a refresh token). Only accounts connected with "Connect Google
+        account" do; a Gmail mailbox added as an IMAP account logs in with its password
+        (a Google app password)."""
+        return self.provider == Provider.GOOGLE
+
+    @property
     def is_gmail(self) -> bool:
-        return (
-            self.provider == Provider.GOOGLE or (self.imap_host or "").lower() == "imap.gmail.com"
-        )
+        """Whether the mailbox is Gmail, however it logs in: Gmail's mail semantics apply
+        (X-GM-EXT search and threads, All Mail as the archive, Sent filed by Gmail)."""
+        return self.uses_google_oauth or (self.imap_host or "").lower() == "imap.gmail.com"
 
     def allows(self, level: MailAccess) -> bool:
         return self.mail_access.rank >= level.rank

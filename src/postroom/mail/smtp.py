@@ -4,9 +4,11 @@ with the same fail2ban care as the IMAP pool.
 - Password accounts make exactly one AUTH attempt per login: PLAIN when the server offers
   it, else LOGIN (both UTF-8). `smtplib.login()` is not used: it tries every advertised
   mechanism in turn, so one wrong password would cost two or three failed logins.
-- Gmail accounts use XOAUTH2 with the same Google access token as IMAP. When Gmail refuses
-  it, the cached token is dropped and the login is retried once with a fresh one; Gmail
-  failures never pause sending (no fail2ban there, and no password to fix).
+- Google (OAuth) accounts use XOAUTH2 with the same Google access token as IMAP. When
+  Gmail refuses it, the cached token is dropped and the login is retried once with a fresh
+  one; these failures never pause sending (no fail2ban there, and no password to fix).
+  A Gmail mailbox added as an IMAP account logs in like any password account (PLAIN, with
+  a Google app password), and a refused app password pauses sending like any other.
 - Every SMTP login holds the account's shared login lock (`login_locks.py`) and re-reads the
   account under it, so an SMTP login never races an IMAP or DAV login to the same server.
 - A password login refused with a permanent (5xx) reply is recorded as
@@ -164,8 +166,9 @@ class SmtpConnector:
         self.smtp_ssl_class = smtp_ssl_class
 
     def _credentials(self, account: Account, secret: str | None) -> str | None:
-        """The Google access token for Gmail accounts (None for password accounts)."""
-        if not account.is_gmail:
+        """The Google access token for Google (OAuth) accounts; None for password accounts,
+        which include Gmail mailboxes added as IMAP accounts with an app password."""
+        if not account.uses_google_oauth:
             if secret is None:
                 raise SmtpAuthFailed("SMTP: no password stored")
             return None
@@ -375,7 +378,7 @@ class SmtpSender:
             raise SmtpError("account busy; try again later")
         try:
             account = self._available(email, manual)
-            secret = None if account.is_gmail else self.repo.get_secret(email)
+            secret = None if account.uses_google_oauth else self.repo.get_secret(email)
             try:
                 smtp = self.connector.connect(account, secret)
             except SmtpAuthFailed as e:

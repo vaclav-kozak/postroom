@@ -143,3 +143,13 @@ def test_mark_connected_is_conditional_on_the_expected_status(repo):
     assert repo.mark_connected("a@x.cz", expected=AccountStatus.PENDING) is True
     acc = repo.get("a@x.cz")
     assert acc.status == AccountStatus.CONNECTED and acc.last_ok_at is not None
+
+
+def test_gmail_semantics_and_google_oauth_are_separate(repo):
+    g = repo.upsert(email="g@gmail.com", provider=Provider.GOOGLE)
+    assert g.is_gmail and g.uses_google_oauth
+    # A Gmail mailbox added as an IMAP account (app password): Gmail semantics, password login.
+    p = repo.upsert(email="p@gmail.com", provider=Provider.IMAP, imap_host="IMAP.gmail.com")
+    assert p.is_gmail and not p.uses_google_oauth
+    o = repo.upsert(email="o@example.org", provider=Provider.IMAP, imap_host="imap.example.org")
+    assert not o.is_gmail and not o.uses_google_oauth

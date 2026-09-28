@@ -400,3 +400,37 @@ async def test_set_access_for_all_accounts(env, smtp, google_account):
 async def test_bulk_access_control_needs_two_accounts(env, google_account):
     c, _, _ = env
     assert 'id="access-all"' not in (await c.get("/admin")).text
+
+
+# -- Gmail with an app password ------------------------------------------------------------------
+
+
+async def test_gmail_added_as_imap_account_tests_with_its_app_password(env, smtp, monkeypatch):
+    """imap.gmail.com + smtp.gmail.com as a plain IMAP account: the admin test logs in with
+    IMAP LOGIN and SMTP AUTH PLAIN using the app password, never with a Google token."""
+    from postroom.mail.imap import ImapConnector
+    from tests.unit.test_imap_pool import LoginRecorder, _no_google_token
+
+    c, services, _ = env
+    imap = services.pool.connector
+    monkeypatch.setattr(imap, "connect", ImapConnector.connect.__get__(imap))
+    monkeypatch.setattr(imap, "google_token", _no_google_token)
+    monkeypatch.setattr(services.mail.smtp.connector, "google_token", _no_google_token)
+    monkeypatch.setattr("postroom.mail.imap.SafeIMAPClient", LoginRecorder)
+    monkeypatch.setattr(LoginRecorder, "logins", [])
+
+    r = await add(
+        c,
+        "p@gmail.com",
+        imap_host="imap.gmail.com",
+        smtp_host="smtp.gmail.com",
+        password="good",
+    )
+    assert r.status_code == 303
+    assert LoginRecorder.logins == [("login", "p@gmail.com", "good")]
+    (s,) = smtp
+    assert (s.host, s.port) == ("smtp.gmail.com", 465)
+    assert s.calls[1] == ("auth", "PLAIN", b"\0p@gmail.com\0good")
+    a = services.repo.get("p@gmail.com")
+    assert a.provider == Provider.IMAP and a.is_gmail and not a.uses_google_oauth
+    assert a.can_send and a.smtp_status == SmtpStatus.OK

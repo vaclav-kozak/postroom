@@ -36,6 +36,11 @@ Postroom is a single-owner server. In scope, among others:
 - **IMAP command injection.** Untrusted input (search terms, folder names, header values from
   received mail) must not be able to inject IMAP commands; arguments containing CR, LF or NUL
   are rejected.
+- **Sending mail.** MCP clients can send only from accounts whose access level is "full" and
+  that have outgoing mail (SMTP) set up; sends are rate limited per account
+  (`POSTROOM_SEND_LIMIT_PER_HOUR`) and the consent page says which accounts can send. Sending
+  from an account that is not allowed to, bypassing the limit, or injecting headers or
+  recipients through tool arguments is in scope.
 - **Resource exhaustion** by crafted mail, attachments, calendar or contact data, and
   spoofing the client IP to evade the login lockout or the auth rate limit.
 - **Leaks** of secrets or email content through error messages or logs.

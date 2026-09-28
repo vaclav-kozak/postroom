@@ -8,6 +8,10 @@ need this: adding accounts in the admin UI works just as well.
 
 - **IMAP accounts:** email, display name, IMAP host, port, security, login name and password.
   Imported accounts start as `pending`, and the background checker tests them.
+- **Outgoing mail (SMTP):** host, port and security, when the SMTP account uses the same
+  password as IMAP (and its login name when that differs). An SMTP account with a different
+  password is skipped: add it in the admin UI. Sending still needs the account's access level
+  set to "full" (the default).
 - **CalDAV/CardDAV URLs** of those accounts, but only `https` ones (`http` only on loopback).
 - **Google accounts** are created without credentials. The refresh tokens in an eM Client
   export belong to eM Client's own OAuth client, so Postroom cannot use them. Reconnect each

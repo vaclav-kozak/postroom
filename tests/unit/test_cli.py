@@ -37,7 +37,8 @@ def test_import_dry_run_writes_nothing(monkeypatch, settings, tmp_path, capsys):
     assert "a@example.com" not in capsys.readouterr().out.split("dry-run")[-1]
 
 
-def test_gen_secrets(tmp_path, capsys):
+def test_gen_secrets(tmp_path, capsys, monkeypatch):
+    monkeypatch.delenv("POSTROOM_MASTER_KEY", raising=False)
     env_out, pw_out = tmp_path / "env", tmp_path / "pw"
     assert cli.main(["gen-secrets", "--env-out", str(env_out), "--password-out", str(pw_out)]) == 0
     for f in (env_out, pw_out):
@@ -48,8 +49,32 @@ def test_gen_secrets(tmp_path, capsys):
     h = base64.b64decode(env["POSTROOM_ADMIN_PASSWORD_HASH_B64"]).decode()
     assert verify_password(h, pw)
     assert len(base64.b64decode(env["POSTROOM_MASTER_KEY"])) == 32
-    printed = capsys.readouterr().out
-    assert pw not in printed and env["POSTROOM_MASTER_KEY"] not in printed
+    out, err = capsys.readouterr()
+    assert pw not in out + err and env["POSTROOM_MASTER_KEY"] not in out + err
+
+
+def test_gen_secrets_prints_a_labelled_password_on_stderr(tmp_path, capsys, monkeypatch):
+    monkeypatch.delenv("POSTROOM_MASTER_KEY", raising=False)
+    env_out = tmp_path / "env"
+    assert cli.main(["gen-secrets", "--env-out", str(env_out)]) == 0
+    out, err = capsys.readouterr()
+    assert out == ""
+    (line,) = [x for x in err.splitlines() if x.startswith("Admin password: ")]
+    pw = line.removeprefix("Admin password: ")
+    env = dict(x.split("=", 1) for x in env_out.read_text().splitlines())
+    assert verify_password(base64.b64decode(env["POSTROOM_ADMIN_PASSWORD_HASH_B64"]).decode(), pw)
+
+
+def test_gen_secrets_refuses_when_a_master_key_is_set(tmp_path, capsys, monkeypatch):
+    monkeypatch.setenv("POSTROOM_MASTER_KEY", "already-there")
+    env_out = tmp_path / "env"
+    assert cli.main(["gen-secrets", "--env-out", str(env_out)]) == 1
+    out, err = capsys.readouterr()
+    assert out == "" and not env_out.exists()
+    assert "POSTROOM_MASTER_KEY is already set" in err and "unreadable" in err
+    assert "already-there" not in err
+    assert cli.main(["gen-secrets", "--env-out", str(env_out), "--force"]) == 0
+    assert "POSTROOM_MASTER_KEY=" in env_out.read_text()
 
 
 def test_set_password_stdin(monkeypatch, capsys):

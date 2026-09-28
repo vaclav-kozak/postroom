@@ -107,7 +107,18 @@ def _cmd_set_access(args: argparse.Namespace) -> int:
     return 0
 
 
+GEN_SECRETS_REFUSED = """\
+postroom: POSTROOM_MASTER_KEY is already set (compose passes it in from .env), so nothing
+was generated. Run gen-secrets once per installation: a new master key makes every stored
+account password and Google token unreadable. To start over, delete the
+POSTROOM_MASTER_KEY, POSTROOM_SESSION_SECRET and POSTROOM_ADMIN_PASSWORD_HASH_B64 lines
+from .env first (or pass --force). To change only the admin password, use set-password."""
+
+
 def _cmd_gen_secrets(args: argparse.Namespace) -> int:
+    if os.environ.get("POSTROOM_MASTER_KEY", "").strip() and not args.force:
+        print(GEN_SECRETS_REFUSED, file=sys.stderr)
+        return 1
     master_key = generate_key()
     session_secret = new_token()
     password = random_password(32)
@@ -119,8 +130,13 @@ def _cmd_gen_secrets(args: argparse.Namespace) -> int:
         f"POSTROOM_ADMIN_PASSWORD_HASH_B64={hash_b64}\n"
     )
     _write_secret_file(args.env_out, env_content)
-    _write_secret_file(args.password_out, password + "\n")
-    print(f"wrote {args.env_out} and {args.password_out}")
+    # Status goes to stderr: stdout may be the .env fragment itself (--env-out /dev/stdout).
+    if args.password_out:
+        _write_secret_file(args.password_out, password + "\n")
+        print(f"wrote {args.env_out} and {args.password_out}", file=sys.stderr)
+    else:
+        print(f"Admin password: {password}", file=sys.stderr)
+        print("Store it in your password manager: Postroom keeps only its hash.", file=sys.stderr)
     return 0
 
 
@@ -287,7 +303,13 @@ def main(argv: list[str] | None = None) -> int:
     )
     p_gen.add_argument("--env-out", required=True, help="Where to write the .env fragment")
     p_gen.add_argument(
-        "--password-out", required=True, help="Where to write the plaintext password"
+        "--password-out",
+        help="Write the plaintext password to this file (default: print it on stderr)",
+    )
+    p_gen.add_argument(
+        "--force",
+        action="store_true",
+        help="Generate even though POSTROOM_MASTER_KEY is already set",
     )
     p_gen.set_defaults(func=_cmd_gen_secrets)
 

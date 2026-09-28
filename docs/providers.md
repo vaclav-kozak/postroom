@@ -9,8 +9,9 @@ A few rules apply to every provider:
   called app-specific or device password) in the provider's account settings and use it in
   Postroom. Many providers refuse the normal password over IMAP.
 - **One password.** Postroom signs in to IMAP, SMTP, CalDAV and CardDAV with the same
-  password. The SMTP username can differ (it defaults to the IMAP username); CalDAV and
-  CardDAV always use the IMAP username.
+  password (IMAP accounts only; Google accounts connected with **Connect Google account**
+  sign in with Google OAuth instead). The SMTP username can differ (it defaults to the
+  IMAP username); CalDAV and CardDAV always use the IMAP username.
 - **CalDAV and CardDAV.** Enter any URL from which the server can find your calendars or
   address books. Postroom asks the server for your principal and home set, so the server's
   root DAV URL is usually enough. The URLs must be `https` (`http` only for `localhost`),
@@ -22,7 +23,7 @@ A few rules apply to every provider:
 
 | Provider | IMAP | SMTP | Notes |
 |---|---|---|---|
-| Gmail / Google Workspace | — | — | Use **Connect Google account**; see [Google setup](google-setup.md). App passwords for `imap.gmail.com` do not work in Postroom. |
+| Gmail / Google Workspace | `imap.gmail.com`, 993, SSL/TLS | `smtp.gmail.com`, 465, SSL/TLS | Needs 2-Step Verification and an [app password](https://support.google.com/accounts/answer/185833) (a Workspace admin can turn app passwords off). This gives mail only; for Google calendars, tasks and contacts use **Connect Google account** instead (see [Google setup](google-setup.md)), which also covers mail. |
 | Fastmail | `imap.fastmail.com`, 993, SSL/TLS | `smtp.fastmail.com`, 465, SSL/TLS | Needs an app password (Settings → Privacy & Security → App passwords) with IMAP, SMTP and, for calendars and contacts, CalDAV/CardDAV access. |
 | iCloud Mail | `imap.mail.me.com`, 993, SSL/TLS | `smtp.mail.me.com`, 587, STARTTLS | Needs an app-specific password from your Apple Account settings. |
 | Yahoo Mail | `imap.mail.yahoo.com`, 993, SSL/TLS | `smtp.mail.yahoo.com`, 465, SSL/TLS | Needs an app password from Yahoo's account security page. |

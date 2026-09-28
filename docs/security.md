@@ -17,7 +17,8 @@ There are two kinds of callers:
 What a client can do with each account is limited by that account's **mail access level**
 (read, organize or full) and by the account's capabilities (calendar, tasks, contacts).
 Levels are stored per account, checked on every call before any server is contacted, and
-changes take effect immediately.
+changes take effect immediately. Every account starts at **organize**, so no account can
+send mail until the owner raises it to **full**.
 
 ## Owner authentication
 
@@ -92,18 +93,40 @@ Postroom is its own authorization server, so no third party is involved in grant
   never a folder-wide `EXPUNGE`, and refuses servers that support neither.
 - **fail2ban safety.** One failed IMAP, CalDAV or CardDAV login marks the account
   "Login failed", and Postroom does not log in again until the owner fixes it or presses
-  **Test now**. A failed SMTP login pauses sending from that account in the same way.
-  Logins for one account are serialised, so queued calls fail fast instead of repeating a
-  wrong password.
+  **Test now**. A password rejected by the SMTP server (a 5xx reply) pauses sending from
+  that account in the same way; a temporary 4xx refusal does not. Each SMTP login makes
+  exactly one AUTH attempt (PLAIN, else LOGIN; a server offering neither is refused before
+  any attempt), so a wrong password costs one failed login, not one per mechanism. Logins
+  for one account are serialised, including the admin's test login when an account is
+  saved, so queued calls fail fast instead of repeating a wrong password.
+- **Google accounts** connected with **Connect Google account** sign in to IMAP and SMTP
+  with XOAUTH2 and a short-lived access token. When Gmail refuses a token, Postroom drops
+  it and tries once with a fresh one; these failures never pause sending, since there is
+  no password to fix. A Gmail mailbox added as an IMAP account signs in with its app
+  password like any other IMAP account.
 
 ## Sending mail
 
-- Sending needs the account's access level **full** and an outgoing server (SMTP, or a
-  Google account). The consent screen tells the owner how many accounts can send.
+- **Opt-in.** Sending needs the account's access level **full** and an outgoing server
+  (SMTP, or a Google account). Every account starts at **organize**, including Google
+  accounts (which need no SMTP settings) and imported ones, so nothing can send until the
+  owner chooses **full** for that account. The consent screen tells the owner how many
+  accounts can send.
 - Every account can send at most `POSTROOM_SEND_LIMIT_PER_HOUR` emails in any 60 minutes
   (default 60). A rejected send still counts.
-- Sends are never retried automatically, so a timeout never causes a duplicate; the error
-  tells the client to check the Sent folder first.
+- **Duplicate guard.** An identical send (same account, recipients, subject, body and
+  attachments) within 10 minutes is refused, and so is the same draft (by `Message-ID`)
+  within an hour. `allow_duplicate=true` overrides it; the tool descriptions tell clients
+  to use it only when the owner asked. The record is kept in memory: a restart clears it.
+- **No automatic retries.** Sends are never retried. A timeout after the message data
+  started says the email may already have been sent and tells the client to check Sent
+  and ask the owner; a timeout before that says nothing was sent. When the connection
+  drops mid-transfer, the Sent copy is marked with the keyword `$MaybeSent` (where the
+  server supports keywords) and the error says not to retry automatically.
+- **`send_draft`** sends only messages with the `\Draft` flag whose `From` (and `Sender`,
+  if present) is one of the account's own addresses, so a message planted in Drafts by
+  someone else cannot be sent as is. Concurrent calls for one draft send it once.
+- Inline attachments on `send_email` are limited to 2 MiB in total (decoded).
 - Recipients, subjects and file names are validated and length-limited; header values
   cannot carry line breaks. `Bcc` is removed from the copy handed to the SMTP server.
 - The tools tell clients to send only what the owner asked for and to treat email content
@@ -122,9 +145,11 @@ Postroom runs comfortably in a 256 MiB container, including with hostile input:
   no `POSTROOM_*` secrets. PDFs over 5 MB and attachments over 10 MB return metadata only.
 - Listings are capped: at most 100 search results per page, 500 events or tasks, 200
   messages per thread and 500 emails per batch call.
-- Request bodies on `/mcp` are limited to 16 MiB, and the OAuth endpoints accept at most
-  16 KiB. The bundled Caddy and the nginx example also allow 16 MB on `/mcp` and 1 MB
-  everywhere else.
+- Request bodies on `/mcp` are limited to 4 MiB (the MCP SDK's limit), and the OAuth
+  endpoints accept at most 16 KiB. The bundled Caddy and the nginx example allow 4 MB on
+  `/mcp` and 1 MB everywhere else.
+- Sending a large message, like reading one, runs under the same one-at-a-time gate for
+  memory-heavy work.
 
 The compose files run the container read-only, as a non-root user, with all capabilities
 dropped, `no-new-privileges`, a 256 MB memory limit and a process limit.

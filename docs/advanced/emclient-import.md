@@ -7,11 +7,17 @@ need this: adding accounts in the admin UI works just as well.
 ## What gets imported
 
 - **IMAP accounts:** email, display name, IMAP host, port, security, login name and password.
-  Imported accounts start as `pending`, and the background checker tests them.
+  Imported accounts start as `pending`, and the background checker tests them. They get the
+  access level "organize", like every new account; an import never changes the level of an
+  existing account.
 - **Outgoing mail (SMTP):** host, port and security, when the SMTP account uses the same
-  password as IMAP (and its login name when that differs). An SMTP account with a different
-  password is skipped: add it in the admin UI. Sending still needs the account's access level
-  set to "full" (the default).
+  password as IMAP (and its login name when that differs). Port 465 is always treated as
+  SSL/TLS, whatever the export calls it. An SMTP login name containing spaces or control
+  characters, or longer than 320 characters, is refused. When the SMTP host, port,
+  security or login name changes, the account's last SMTP result (such as "SMTP OK" or a
+  paused login) is cleared. An SMTP account with a different password is skipped: add it in the
+  admin UI. Sending also needs the account's access level set to "full", which is an
+  explicit choice (`postroom set-access <email> full` or the admin UI).
 - **CalDAV/CardDAV URLs** of those accounts, but only `https` ones (`http` only on loopback).
 - **Google accounts** are created without credentials. The refresh tokens in an eM Client
   export belong to eM Client's own OAuth client, so Postroom cannot use them. Reconnect each

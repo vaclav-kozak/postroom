@@ -5,6 +5,10 @@ client that you create in your own Google Cloud project. Your tokens are issued 
 client and stored only on your server. You do this once; afterwards you can connect any
 number of Google accounts from the admin UI.
 
+Only want Gmail's mail? You can skip this guide and add the mailbox as an IMAP account
+with a Google app password instead (see [Provider settings](providers.md#mail)). Google
+calendars, tasks and contacts need the OAuth client described here.
+
 You need:
 
 - Postroom running at its public address, for example `https://mcp.example.com`

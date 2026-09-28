@@ -50,15 +50,16 @@ assistant may change.
 - **Self-hosted.** Your mailbox passwords and Google tokens stay on your server,
   encrypted at rest with a key that never enters the database.
 - **Safe by design.** Reading comes first, and a draft for you to review is the default
-  way to compose. Each mailbox has an access level (read, organize or full), nothing is
-  ever deleted permanently, the calendar tools never invite anyone, and every tool carries
-  MCP annotations, so clients ask before a destructive action.
+  way to compose. Each mailbox has an access level (read, organize or full), and sending
+  is off until you turn it on for an account. Nothing is ever deleted permanently, the
+  calendar tools never invite anyone, and every tool carries MCP annotations, so clients
+  ask before a destructive action.
 
 ## Features
 
 **Mail**
 - Any IMAP server (SSL/TLS or STARTTLS), plus Gmail and Google Workspace through Google
-  sign-in.
+  sign-in or with an app password.
 - Search one, several or all accounts; Gmail accounts accept Gmail search syntax.
 - Read emails as text (HTML is converted), follow threads (Gmail's native threads, or
   `Message-ID`/`References` elsewhere), and read attachments: text, PDF text and images.
@@ -66,7 +67,8 @@ assistant may change.
 - Organise: mark read or unread, star, move, archive (Gmail-aware), move to Trash and
   create folders. Batch calls take up to 500 emails across accounts.
 - Send, reply, reply-all, forward and send a saved draft over SMTP, with attachments,
-  a copy in Sent and a per-account hourly limit.
+  a copy in Sent, a per-account hourly limit and a guard against sending the same email
+  twice. Sending is opt-in per account.
 
 **Calendar and tasks**
 - Google Calendar and Google Tasks, and any CalDAV server (calendars and VTODO task lists).
@@ -98,9 +100,10 @@ assistant may change.
 
 Postroom exposes 25 tools. `account` is always the account's email address, as
 `list_accounts` returns it. Mail tools need the account's [access level](#access-levels)
-shown in the last column. Calendar, task and contact tools need the account to have that
-capability: Google accounts have all three, IMAP accounts have them when CalDAV/CardDAV
-URLs are set.
+shown in the last column, and the send tools have extra
+[safeguards](#sending-safeguards). Calendar, task and contact tools need the account to
+have that capability: Google accounts have all three, IMAP accounts have them when
+CalDAV/CardDAV URLs are set.
 
 ### Mail
 
@@ -117,9 +120,9 @@ URLs are set.
 | `move_emails` | Moves emails to another folder or an alias (`inbox`, `archive`, `junk`, `trash`, `all`). | organize |
 | `trash_emails` | Moves emails to Trash. Nothing is deleted permanently. | organize |
 | `create_folder` | Creates a folder, optionally inside another one. | organize |
-| `send_email` | Sends a new email, reply or reply-all immediately, with optional attachments. | full + SMTP |
-| `forward_email` | Forwards an email immediately, with its attachments unless told not to. | full + SMTP |
-| `send_draft` | Sends a saved draft as it is and removes it from Drafts. | full + SMTP |
+| `send_email` | Sends a new email, reply or reply-all immediately, with optional attachments (up to 2 MiB). Takes `allow_duplicate`. | full + SMTP |
+| `forward_email` | Forwards an email immediately, with its attachments unless told not to. Takes `allow_duplicate`. | full + SMTP |
+| `send_draft` | Sends one of the account's own saved drafts as it is and removes it from Drafts. Takes `allow_duplicate`. | full + SMTP |
 
 ### Calendar and tasks
 
@@ -149,13 +152,41 @@ Notes:
   before running them.
 - Events and tasks that have attendees or repeat can be read but not changed or deleted,
   so Postroom never sends an invitation or a cancellation.
-- Postroom currently works in the **Europe/Prague** time zone: date-times without a UTC
-  offset are read as Prague time, new events are stored with that zone, and the admin UI
-  shows Prague time. Give an offset (`2026-10-05T09:00:00+02:00`) to be exact. A
-  configurable time zone is on the [roadmap](#roadmap).
+- **Time zone.** Date-times without a UTC offset are read in the server's time zone,
+  `POSTROOM_TIMEZONE` (default `UTC`). New calendar events are stored in that zone, event
+  times are returned in it, and the admin UI shows times in it. The server tells clients
+  the zone in its instructions, and `list_calendars` returns it as `time_zone`. Give an
+  offset (`2026-10-05T09:00:00+02:00`) to be exact.
 - Limits: `search_emails` returns 1-100 results per page; the batch tools take up to 500
-  emails; `send_email` attachments total at most 10 MiB; `forward_email` re-attaches at
-  most 20 MiB.
+  emails; `send_email` attachments total at most **2 MiB** (decoded); `forward_email`
+  re-attaches at most 20 MiB; `send_draft` sends drafts of up to 25 MiB. For files larger
+  than 2 MiB, forward an email that has them, or attach them to a draft yourself and let
+  the client call `send_draft`.
+
+### Sending safeguards
+
+The three send tools send immediately, so they carry extra checks:
+
+- **Opt-in.** An account can send only at access level **full** with an outgoing server
+  (see [Access levels](#access-levels)). Every account starts at **organize**.
+- **No accidental duplicates.** An identical send (same account, recipients, subject, body
+  and attachments) within 10 minutes of the first is refused, and so is sending the same
+  draft (by its `Message-ID`) again within an hour. Each send tool takes
+  `allow_duplicate` (default `false`); the tool descriptions tell clients to set it only
+  when you ask for a second copy. The record is kept in memory, so a restart clears it.
+- **No automatic retries.** A send that times out after the message data started may
+  already have gone out: the tool says so and tells the client to check Sent
+  (`search_emails` with `folder='sent'`) and ask you, never to retry on its own. A timeout
+  before that point says nothing was sent. If the connection drops while the message is
+  being handed over, the copy in Sent carries the keyword **`$MaybeSent`** (on servers that
+  support keywords) and the tool says "do not retry automatically".
+- **`send_draft`** sends only the account's own drafts: the message needs the `\Draft` flag
+  and a `From` (and `Sender`, if present) that is one of the account's addresses, even
+  when it is in the Drafts folder. Two calls for the same draft never send it twice.
+- **SMTP logins** make exactly one AUTH attempt (PLAIN, else LOGIN; a server offering
+  neither is refused with a clear message). A password rejection (5xx) pauses sending from
+  that account until you press **Test now**; a temporary refusal (4xx) does not.
+  Accounts connected with Google OAuth refresh their token once and never pause.
 
 ## Quick start
 
@@ -230,17 +261,18 @@ docker compose -f docker-compose.proxy.yml up -d
 ```
 
 [`deploy/nginx/postroom.conf.example`](deploy/nginx/postroom.conf.example) is a complete
-nginx site: TLS, HSTS, a rate limit on the login and OAuth endpoints, 16 MB bodies and
-unbuffered streaming on `/mcp`, and no access log (query strings can carry one-time OAuth
-codes).
+nginx site: TLS, HSTS, a rate limit on the login and OAuth endpoints, 4 MB bodies and
+unbuffered streaming on `/mcp` (1 MB elsewhere), and no access log (query strings can carry
+one-time OAuth codes).
 
 Your proxy must:
 
 - terminate TLS and pass requests to `http://127.0.0.1:8000`;
 - **set or overwrite** `X-Forwarded-For` with the client's address (not append to a value
   the client sent), and preferably also set `X-Real-IP` and `X-Forwarded-Proto`;
-- allow request bodies of 16 MB on `/mcp` (for `send_email` attachments) and not buffer
-  its responses.
+- allow request bodies of 4 MB on `/mcp` (for `send_email` attachments; 1 MB is enough
+  everywhere else) and not buffer its responses. Postroom itself accepts at most 4 MiB per
+  MCP request, so a larger limit gains nothing.
 
 **Client addresses.** Postroom believes `X-Forwarded-For`, `X-Real-IP` and
 `X-Forwarded-Proto` only from the addresses in `POSTROOM_TRUSTED_PROXIES` and removes them
@@ -319,9 +351,17 @@ username (the email address is used when it is empty) and the password. Provider
 two-step sign-in, such as iCloud, Fastmail and Yahoo, need an **app password** created in
 the provider's account settings; your normal password will not work.
 
-**Gmail and Google Workspace** accounts must be added with **Connect Google account**
-(see [Google setup](#google-setup)). An account on `imap.gmail.com` always signs in with
-Google OAuth, so a Gmail app password does not work in Postroom.
+**Gmail and Google Workspace** can be added in two ways:
+
+- **Connect Google account** (see [Google setup](#google-setup)) signs in with Google OAuth
+  and brings mail, calendars, tasks and contacts. It needs a Google OAuth client of your
+  own.
+- As an **IMAP account with an app password**: IMAP server `imap.gmail.com` (993, SSL/TLS),
+  SMTP server `smtp.gmail.com` (465, SSL/TLS), and a
+  [Google app password](https://support.google.com/accounts/answer/185833) (it needs
+  2-Step Verification). This gives mail only: Google's calendars and contacts need OAuth.
+  Postroom still treats the mailbox as Gmail (Gmail search syntax, native threads, archive
+  to All Mail).
 
 **Outgoing mail (SMTP)** is optional. Fill in the SMTP server to let Postroom send from the
 account; the form suggests one based on the IMAP host. Security is SSL/TLS (usually port
@@ -343,8 +383,10 @@ sign-in for IMAP and SMTP, and Postroom has no Microsoft OAuth yet. It is on the
 ### Access levels
 
 Each account has a mail access level. Set it on the account's **Edit** page in the admin,
-or with `postroom set-access <email> <read|organize|full>`. A change applies immediately,
-also to clients that are already connected.
+with `postroom set-access <email> <read|organize|full>`, or for every account at once with
+`postroom set-access --all <level>` or the dashboard's **Access level for all accounts**
+control (shown when there are two or more accounts). A change applies immediately, also
+to clients that are already connected.
 
 | Level | What MCP clients may do with the account's mail |
 |---|---|
@@ -352,8 +394,10 @@ also to clients that are already connected.
 | **Organize** | Also mark read or unread, star, move, archive, trash, and create folders. |
 | **Full** | Also send, reply, forward and send drafts (needs an SMTP server, or a Google account). |
 
-Accounts start with **Full**. Lower it for any mailbox an assistant should only read.
-Access levels apply to mail only; calendar, task and contact tools are not affected.
+Every account starts at **Organize** (new, Google and imported accounts alike): sending is
+opt-in. Raise an account to **Full** only if an assistant should send from it, and lower
+it to **Read** for any mailbox an assistant should only read. Access levels apply to mail
+only; calendar, task and contact tools are not affected.
 
 ## Google setup
 
@@ -399,6 +443,7 @@ Postroom reads its settings from environment variables; with Docker Compose they
 | `POSTROOM_AUTH_RATE_LIMIT_PER_MINUTE` | `10` | Requests per minute per client IP to `/login`, `/register`, `/authorize` and `/token` (burst 10). `0` disables the limit. |
 | `POSTROOM_TRUSTED_PROXIES` | `127.0.0.1,::1` (compose files: the private ranges) | IPs or CIDRs of reverse proxies whose forwarding headers are believed. |
 | `POSTROOM_SEND_LIMIT_PER_HOUR` | `60` | Emails one account may send in any 60 minutes, across `send_email`, `forward_email` and `send_draft`. `0` means no limit. |
+| `POSTROOM_TIMEZONE` | `UTC` | IANA time zone (for example `Europe/Berlin` or `America/New_York`) for date-times given without a UTC offset, new calendar events and the times shown in the admin UI. An unknown name stops Postroom at startup with a configuration error. |
 | `POSTROOM_CHECK_INTERVAL_SECONDS` | `21600` | Seconds between background account checks and maintenance. `0` turns them off. |
 | `POSTROOM_DB_PATH` | `./data/postroom.db` (image: `/data/postroom.db`) | The SQLite database file. Change it only when running without Docker. |
 
@@ -429,8 +474,9 @@ is below; [docs/security.md](docs/security.md) has the details, and
 - **Careful input handling.** IMAP arguments containing CR, LF or NUL are refused, so
   nothing can inject IMAP commands. CalDAV/CardDAV credentials go only to `https` URLs. Big
   mail is read part by part, and PDFs are parsed in a child process with a memory limit.
-- **Limits.** Per-IP rate limits on the login and OAuth endpoints, an hourly send limit
-  per account, and per-account access levels.
+- **Limits.** Per-IP rate limits on the login and OAuth endpoints, per-account access
+  levels with sending off by default, an hourly send limit per account, and a
+  duplicate-send guard.
 - **If a token is stolen,** whoever holds it can do what the approved app could do (within
   each account's access level) until you revoke it. **Admin → Authorized apps → Revoke**
   ends all of that app's tokens at once, and **API keys → Revoke** ends a key. Disabling an
@@ -477,7 +523,7 @@ it.
 | `set-password [--stdin]` | Prints a new `POSTROOM_ADMIN_PASSWORD_HASH_B64` line. |
 | `hash-password` | Hashes a password read from stdin. |
 | `list-accounts` | Lists the accounts with status, access level and last error. |
-| `set-access EMAIL LEVEL` | Sets an account's mail access level: `read`, `organize` or `full`. |
+| `set-access EMAIL LEVEL` | Sets an account's mail access level: `read`, `organize` or `full`. `set-access --all LEVEL` sets every account at once. |
 | `check-accounts [--email E ...]` | Tests accounts now (never retries accounts whose login failed). |
 | `create-api-key NAME` | Creates an MCP API key and prints it once. |
 | `list-api-keys` | Lists API keys (never the keys themselves). |
@@ -509,7 +555,6 @@ see [docs/advanced/emclient-import.md](docs/advanced/emclient-import.md).
 Ideas, not promises:
 
 - Microsoft 365 and Outlook.com through Microsoft OAuth.
-- A configurable time zone (today it is fixed to Europe/Prague).
 - Editing contacts.
 - Notifications about new mail (IMAP IDLE), if MCP clients come to support them well.
 

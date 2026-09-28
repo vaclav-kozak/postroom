@@ -37,11 +37,17 @@ protects the owner's credentials in detail. In scope, among others:
 - **IMAP command injection.** Untrusted input (search terms, folder names, header values from
   received mail) must not be able to inject IMAP commands; arguments containing CR, LF or NUL
   are rejected.
-- **Sending mail.** MCP clients can send only from accounts whose access level is "full" and
-  that have outgoing mail (SMTP) set up; sends are rate limited per account
-  (`POSTROOM_SEND_LIMIT_PER_HOUR`) and the consent page says which accounts can send. Sending
-  from an account that is not allowed to, bypassing the limit, or injecting headers or
-  recipients through tool arguments is in scope.
+- **Sending mail.** Sending is opt-in per account: every account starts at access level
+  "organize", and MCP clients can send only from accounts the owner set to "full" that have
+  outgoing mail (SMTP, or a Google account). Sends are rate limited per account
+  (`POSTROOM_SEND_LIMIT_PER_HOUR`), an identical send within 10 minutes (the same draft
+  within an hour) is refused unless `allow_duplicate` is set, sends are never retried, and
+  a send whose outcome is unknown leaves a Sent copy marked `$MaybeSent`. The consent page
+  says which accounts can send. `/mcp` accepts at most 4 MB per request. Every SMTP login,
+  including the admin's test login, holds the account's login lock and makes exactly one
+  AUTH attempt. Sending from an account that is not allowed to, bypassing the limit or the
+  duplicate guard, sending someone else's message through `send_draft`, or injecting
+  headers or recipients through tool arguments is in scope.
 - **Resource exhaustion** by crafted mail, attachments, calendar or contact data, and
   spoofing the client IP to evade the login lockout or the auth rate limit.
 - **Leaks** of secrets or email content through error messages or logs.

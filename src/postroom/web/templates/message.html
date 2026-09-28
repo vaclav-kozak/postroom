@@ -1,9 +1,10 @@
 {% extends "base.html" %}
 {% block title %}{{ title }} · Postroom{% endblock %}
+{% block body_class %}page-narrow{% endblock %}
 {% block content %}
-<section class="card narrow">
+<section class="card card-narrow">
   <h1>{{ title }}</h1>
-  <p>{{ message }}</p>
-  {% if link %}<p><a href="{{ link }}">{{ link_text or "Continue" }}</a></p>{% endif %}
+  <p class="lede">{{ message }}</p>
+  {% if link %}<p class="form-actions"><a class="btn btn-secondary" href="{{ link }}">{{ link_text or "Continue" }}</a></p>{% endif %}
 </section>
 {% endblock %}

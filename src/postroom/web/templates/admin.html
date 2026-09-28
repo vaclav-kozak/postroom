@@ -1,128 +1,203 @@
 {% extends "base.html" %}
 {% block title %}Admin · Postroom{% endblock %}
 {% block content %}
-{% if flash %}<p class="flash" role="status">{{ flash }}</p>{% endif %}
+{% set status_labels = {
+  "connected": "Connected",
+  "pending": "Not checked yet",
+  "error": "Error",
+  "needs_reconnect": "Login failed",
+  "needs_google_connect": "Needs Google sign-in",
+} %}
+{% set status_tones = {"connected": "ok", "pending": "neutral"} %}
+{% set connected = accounts | selectattr("enabled") | selectattr("status.value", "equalto", "connected") | list %}
+{% if flash %}<p class="notice notice-ok" role="status">{{ flash }}</p>{% endif %}
 
-<section class="card">
-  <h1>Connection</h1>
-  <p>MCP server URL (add it as a custom connector in Claude):</p>
-  <code class="secret">{{ mcp_url }}</code>
+<div class="page-head">
+  <h1>Mail room</h1>
+  <p class="lede">{% if accounts %}{{ connected | length }} of {{ accounts | length }} account{{ "" if accounts | length == 1 else "s" }} connected.{% else %}No accounts yet.{% endif %}</p>
+</div>
+
+<section class="panel panel-connect" aria-labelledby="connect-title">
+  <div class="panel-head">
+    <div>
+      <h2 id="connect-title">Connect Claude</h2>
+      <p class="panel-sub">Add this MCP server URL as a custom connector in Claude.</p>
+    </div>
+  </div>
+  <div class="copyfield">
+    <code class="secret" id="mcp-url">{{ mcp_url }}</code>
+    <button type="button" class="btn btn-secondary btn-small copy" data-copy="mcp-url" hidden>Copy</button>
+  </div>
 </section>
 
-<h2>Accounts</h2>
-<div class="actions">
-  <a href="/admin/accounts/new"><button type="button">Add IMAP account</button></a>
-  {% if google_enabled %}<a href="/admin/google/connect"><button type="button">Connect Google account</button></a>{% endif %}
-</div>
-<table>
-  <thead>
-    <tr><th>Email</th><th>Name</th><th>Provider</th><th>Capabilities</th><th>Status</th>
-      <th>Last OK</th><th>Last error</th><th>Actions</th></tr>
-  </thead>
-  <tbody>
-  {% for a in accounts %}
-    <tr>
-      <td>{{ a.email }}</td>
-      <td>{{ a.display_name or "" }}</td>
-      <td>{{ a.provider.value }}</td>
-      <td>{{ a.capabilities | join(", ") }}</td>
-      <td>
-        {% if a.enabled %}<span class="badge badge-{{ a.status.value }}">{{ a.status.value | replace("_", " ") }}</span>
-        {% else %}<span class="badge badge-disabled">disabled</span>{% endif %}
-      </td>
-      <td>{{ a.last_ok_at | ts }}</td>
-      <td>{{ a.last_error or "" }}</td>
-      <td>
-        <div class="row-actions">
-          <form method="post" action="/admin/accounts/{{ a.id }}/test" class="inline">
-            <input type="hidden" name="csrf" value="{{ csrf }}">
-            <button type="submit">Test now</button>
-          </form>
-          {% if a.provider.value == "google" %}
-            {% if google_enabled %}<a href="/admin/google/connect?account_id={{ a.id }}"><button type="button">Reconnect</button></a>{% endif %}
+<section class="panel" aria-labelledby="accounts-title">
+  <div class="panel-head">
+    <div>
+      <h2 id="accounts-title">Accounts</h2>
+      <p class="panel-sub">Mailboxes, calendars and contacts Claude can reach.</p>
+    </div>
+    {% if accounts %}
+    <div class="panel-actions">
+      <a class="btn btn-secondary" href="/admin/accounts/new">Add IMAP account</a>
+      {% if google_enabled %}<a class="btn btn-secondary" href="/admin/google/connect">Connect Google account</a>{% endif %}
+    </div>
+    {% endif %}
+  </div>
+  {% if accounts %}
+  <table class="rows accounts">
+    <thead>
+      <tr><th scope="col">Account</th><th scope="col">Status</th><th scope="col"><span class="sr-only">Actions</span></th></tr>
+    </thead>
+    <tbody>
+    {% for a in accounts %}
+      {% set st = a.status.value %}
+      <tr class="{% if not a.enabled %}is-disabled{% endif %}">
+        <td class="cell-account">
+          <span class="acct-email">{{ a.email }}</span>
+          <span class="tag">{% if a.provider.value == "google" %}Google{% else %}IMAP{% endif %}</span>
+          {% if a.display_name %}<span class="acct-name">{{ a.display_name }}</span>{% endif %}
+          <ul class="chips" aria-label="Can use">{% for c in a.capabilities %}<li class="chip">{{ c }}</li>{% endfor %}</ul>
+        </td>
+        <td data-label="Status" class="cell-status">
+          {% if a.enabled %}
+          <span class="badge badge-{{ status_tones.get(st, 'bad') }} badge-{{ st }}">{{ status_labels.get(st, st | replace("_", " ")) }}</span>
           {% else %}
-            <a href="/admin/accounts/{{ a.id }}/edit"><button type="button">Edit</button></a>
+          <span class="badge badge-off badge-disabled">Disabled</span>
           {% endif %}
-          <form method="post" action="/admin/accounts/{{ a.id }}/toggle" class="inline">
-            <input type="hidden" name="csrf" value="{{ csrf }}">
-            <button type="submit">{% if a.enabled %}Disable{% else %}Enable{% endif %}</button>
-          </form>
-        </div>
-        <details class="remove">
-          <summary>Remove</summary>
-          <form method="post" action="/admin/accounts/{{ a.id }}/delete">
-            <input type="hidden" name="csrf" value="{{ csrf }}">
-            <label for="confirm-{{ a.id }}">Type {{ a.email }} to confirm</label>
-            <input id="confirm-{{ a.id }}" name="confirm" type="text" autocomplete="off" required>
-            <button type="submit" class="danger">Remove account</button>
-          </form>
-        </details>
-      </td>
-    </tr>
+          <span class="meta">Checked {{ a.last_check_at | ts }}</span>
+          {% if st != "connected" and a.last_ok_at %}<span class="meta">Last OK {{ a.last_ok_at | ts }}</span>{% endif %}
+          {% if a.last_error %}<span class="row-error">{{ a.last_error }}</span>{% endif %}
+        </td>
+        <td class="cell-actions">
+          <div class="row-actions">
+            <form method="post" action="/admin/accounts/{{ a.id }}/test" class="inline">
+              <input type="hidden" name="csrf" value="{{ csrf }}">
+              <button type="submit" class="btn btn-secondary btn-small">Test now</button>
+            </form>
+            {% if a.provider.value == "google" %}
+              {% if google_enabled %}<a class="btn btn-secondary btn-small" href="/admin/google/connect?account_id={{ a.id }}">Reconnect</a>{% endif %}
+            {% else %}
+              <a class="btn btn-secondary btn-small" href="/admin/accounts/{{ a.id }}/edit">Edit</a>
+            {% endif %}
+            <form method="post" action="/admin/accounts/{{ a.id }}/toggle" class="inline">
+              <input type="hidden" name="csrf" value="{{ csrf }}">
+              <button type="submit" class="btn btn-secondary btn-small">{% if a.enabled %}Disable{% else %}Enable{% endif %}</button>
+            </form>
+            <details class="remove">
+              <summary class="btn btn-danger-quiet btn-small">Remove</summary>
+              <form method="post" action="/admin/accounts/{{ a.id }}/delete" class="remove-form">
+                <input type="hidden" name="csrf" value="{{ csrf }}">
+                <label for="confirm-{{ a.id }}">Type {{ a.email }} to confirm</label>
+                <input id="confirm-{{ a.id }}" name="confirm" type="text" autocomplete="off" required spellcheck="false" autocapitalize="off">
+                <button type="submit" class="btn btn-danger btn-small">Remove account</button>
+              </form>
+            </details>
+          </div>
+        </td>
+      </tr>
+    {% endfor %}
+    </tbody>
+  </table>
   {% else %}
-    <tr><td colspan="8">No accounts yet.</td></tr>
-  {% endfor %}
-  </tbody>
-</table>
+  <div class="empty">
+    <svg class="empty-art" viewBox="0 0 96 64" aria-hidden="true" focusable="false">
+      <rect class="env" x="4" y="8" width="80" height="52" rx="3"/>
+      <path class="env-flap" d="M4 11l40 28 40-28"/>
+      <g class="empty-stamp"><rect x="64" y="4" width="26" height="22"/><path d="M69 11h16v10H69z"/></g>
+    </svg>
+    <div>
+      <h3>Add your first account</h3>
+      <p>Postroom signs in to your mailboxes, calendars and contacts so Claude can use them.
+      Every account is tested before it is saved.</p>
+      <div class="form-actions">
+        <a class="btn btn-primary" href="/admin/accounts/new">Add IMAP account</a>
+        {% if google_enabled %}<a class="btn btn-secondary" href="/admin/google/connect">Connect Google account</a>{% endif %}
+      </div>
+    </div>
+  </div>
+  {% endif %}
+</section>
 
-<h2>Authorized OAuth clients</h2>
-<table>
-  <thead><tr><th>Name</th><th>Redirect hosts</th><th>Created</th><th>Last used</th><th>Active tokens</th><th></th></tr></thead>
-  <tbody>
-  {% for c in clients %}
-    <tr>
-      <td>{{ c.client_name or "(unnamed)" }}<br><code class="hint">{{ c.client_id }}</code></td>
-      <td>{{ c.redirect_hosts | join(", ") }}</td>
-      <td>{{ c.created_at | ts }}</td>
-      <td>{{ c.last_used_at | ts }}</td>
-      <td>{{ c.active_tokens }}</td>
-      <td>
-        <form method="post" action="/admin/clients/{{ c.client_id | urlencode }}/revoke" class="inline">
-          <input type="hidden" name="csrf" value="{{ csrf }}">
-          <button type="submit" class="danger">Revoke</button>
-        </form>
-      </td>
-    </tr>
+<section class="panel" aria-labelledby="clients-title">
+  <div class="panel-head">
+    <div>
+      <h2 id="clients-title">Authorized apps</h2>
+      <p class="panel-sub">OAuth clients you allowed in. Revoking one signs it out at once.</p>
+    </div>
+  </div>
+  {% if clients %}
+  <table class="rows">
+    <thead><tr><th scope="col">App</th><th scope="col">Redirect hosts</th><th scope="col">Created</th><th scope="col">Last used</th><th scope="col">Active tokens</th><th scope="col"><span class="sr-only">Actions</span></th></tr></thead>
+    <tbody>
+    {% for c in clients %}
+      <tr>
+        <td class="cell-primary"><span class="acct-email">{{ c.client_name or "(unnamed)" }}</span><code class="client-id">{{ c.client_id }}</code></td>
+        <td data-label="Redirect hosts">{{ c.redirect_hosts | join(", ") }}</td>
+        <td data-label="Created" class="num">{{ c.created_at | ts }}</td>
+        <td data-label="Last used" class="num">{{ c.last_used_at | ts }}</td>
+        <td data-label="Active tokens" class="num">{{ c.active_tokens }}</td>
+        <td class="cell-actions">
+          <form method="post" action="/admin/clients/{{ c.client_id | urlencode }}/revoke" class="inline">
+            <input type="hidden" name="csrf" value="{{ csrf }}">
+            <button type="submit" class="btn btn-danger-quiet btn-small">Revoke</button>
+          </form>
+        </td>
+      </tr>
+    {% endfor %}
+    </tbody>
+  </table>
   {% else %}
-    <tr><td colspan="6">No clients registered.</td></tr>
-  {% endfor %}
-  </tbody>
-</table>
+  <p class="empty-line">No apps yet. Claude appears here after you add the connector and click Allow.</p>
+  {% endif %}
+</section>
 
-<h2>API keys</h2>
-<table>
-  <thead><tr><th>Name</th><th>Prefix</th><th>Created</th><th>Last used</th><th></th></tr></thead>
-  <tbody>
-  {% for k in api_keys %}
-    <tr>
-      <td>{{ k.name }}</td>
-      <td><code>{{ k.prefix }}…</code></td>
-      <td>{{ k.created_at | ts }}</td>
-      <td>{{ k.last_used_at | ts }}</td>
-      <td>
-        <form method="post" action="/admin/api-keys/{{ k.id }}/revoke" class="inline">
-          <input type="hidden" name="csrf" value="{{ csrf }}">
-          <button type="submit" class="danger">Revoke</button>
-        </form>
-      </td>
-    </tr>
+<section class="panel" aria-labelledby="keys-title">
+  <div class="panel-head">
+    <div>
+      <h2 id="keys-title">API keys</h2>
+      <p class="panel-sub">For MCP clients without OAuth, such as scripts or Claude Code.</p>
+    </div>
+  </div>
+  {% if api_keys %}
+  <table class="rows">
+    <thead><tr><th scope="col">Name</th><th scope="col">Prefix</th><th scope="col">Created</th><th scope="col">Last used</th><th scope="col"><span class="sr-only">Actions</span></th></tr></thead>
+    <tbody>
+    {% for k in api_keys %}
+      <tr>
+        <td class="cell-primary"><span class="acct-email">{{ k.name }}</span></td>
+        <td data-label="Prefix"><code>{{ k.prefix }}…</code></td>
+        <td data-label="Created" class="num">{{ k.created_at | ts }}</td>
+        <td data-label="Last used" class="num">{{ k.last_used_at | ts }}</td>
+        <td class="cell-actions">
+          <form method="post" action="/admin/api-keys/{{ k.id }}/revoke" class="inline">
+            <input type="hidden" name="csrf" value="{{ csrf }}">
+            <button type="submit" class="btn btn-danger-quiet btn-small">Revoke</button>
+          </form>
+        </td>
+      </tr>
+    {% endfor %}
+    </tbody>
+  </table>
   {% else %}
-    <tr><td colspan="5">No API keys.</td></tr>
-  {% endfor %}
-  </tbody>
-</table>
-<form method="post" action="/admin/api-keys" class="actions">
-  <input type="hidden" name="csrf" value="{{ csrf }}">
-  <label for="key-name" class="hint">New key name</label>
-  <input id="key-name" name="name" type="text" maxlength="60" required>
-  <button type="submit" class="primary">Create API key</button>
-</form>
+  <p class="empty-line">No API keys.</p>
+  {% endif %}
+  <form method="post" action="/admin/api-keys" class="key-form">
+    <input type="hidden" name="csrf" value="{{ csrf }}">
+    <div class="field">
+      <label for="key-name">New key name</label>
+      <input id="key-name" name="name" type="text" maxlength="60" required placeholder="e.g. laptop">
+    </div>
+    <button type="submit" class="btn btn-primary">Create API key</button>
+  </form>
+</section>
 
 <details class="advanced">
   <summary>Advanced</summary>
-  <p class="hint">Optional: bulk-import IMAP accounts from an eM Client export. The first line of
-    the input is the export passphrase, the rest is the XML. See
-    <code>docs/advanced/emclient-import.md</code>.</p>
-  <code class="secret">{{ import_command }}</code>
+  <div class="advanced-body">
+    <p class="hint">Optional: bulk-import IMAP accounts from an eM Client export. The first line of
+      the input is the export passphrase, the rest is the XML. See
+      <code>docs/advanced/emclient-import.md</code>.</p>
+    <code class="secret">{{ import_command }}</code>
+  </div>
 </details>
 {% endblock %}

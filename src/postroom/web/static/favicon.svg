@@ -1,0 +1,9 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 32 32">
+  <mask id="perf">
+    <rect width="32" height="32" fill="#fff"/>
+    <rect x="2" y="2" width="28" height="28" fill="none" stroke="#000" stroke-width="2.6" stroke-dasharray="0 4" stroke-linecap="round"/>
+  </mask>
+  <rect x="2" y="2" width="28" height="28" fill="#c23b22" mask="url(#perf)"/>
+  <rect x="6" y="6" width="20" height="20" fill="none" stroke="#fff" stroke-opacity=".55" stroke-width="1"/>
+  <path d="M9.5 11.5h13v9.5h-13z M9.5 11.5l6.5 5.2 6.5-5.2" fill="none" stroke="#fff" stroke-width="1.7" stroke-linejoin="round"/>
+</svg>

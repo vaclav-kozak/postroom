@@ -1,40 +1,97 @@
 {% extends "base.html" %}
 {% block title %}{% if account %}Edit account{% else %}Add IMAP account{% endif %} · Postroom{% endblock %}
 {% block content %}
-<section class="card narrow">
+<div class="page-head">
+  <p class="crumb"><a href="/admin">Accounts</a></p>
   <h1>{% if account %}Edit {{ account.email }}{% else %}Add IMAP account{% endif %}</h1>
-  {% if error %}<p class="alert" role="alert">{{ error }}</p>{% endif %}
-  <form method="post" action="{% if account %}/admin/accounts/{{ account.id }}{% else %}/admin/accounts{% endif %}">
-    <input type="hidden" name="csrf" value="{{ csrf }}">
-    <label for="email">Email</label>
-    <input id="email" name="email" type="email" value="{{ f.email }}" required {% if account %}readonly{% endif %}>
-    <label for="display_name">Display name</label>
-    <input id="display_name" name="display_name" type="text" value="{{ f.display_name }}">
-    <label for="imap_host">IMAP server</label>
-    <input id="imap_host" name="imap_host" type="text" value="{{ f.imap_host }}" required>
-    <label for="imap_port">Port</label>
-    <input id="imap_port" name="imap_port" type="number" min="1" max="65535" value="{{ f.imap_port }}" required>
-    <label for="imap_security">Security</label>
-    <select id="imap_security" name="imap_security">
-      <option value="ssl" {% if f.imap_security == "ssl" %}selected{% endif %}>SSL/TLS</option>
-      <option value="starttls" {% if f.imap_security == "starttls" %}selected{% endif %}>STARTTLS</option>
-    </select>
-    <label for="imap_username">Username <span class="hint">(leave empty to use the email)</span></label>
-    <input id="imap_username" name="imap_username" type="text" value="{{ f.imap_username }}" autocomplete="off">
-    <label for="password">Password {% if account %}<span class="hint">(leave empty to keep)</span>{% endif %}</label>
-    <input id="password" name="password" type="password" value="" autocomplete="new-password" {% if not account %}required{% endif %}>
-    <label for="caldav_url">CalDAV URL <span class="hint">(optional)</span></label>
-    <input id="caldav_url" name="caldav_url" type="url" value="{{ f.caldav_url }}">
-    <label for="carddav_url">CardDAV URL <span class="hint">(optional)</span></label>
-    <input id="carddav_url" name="carddav_url" type="url" value="{{ f.carddav_url }}">
-    <p class="hint">Fill these in to use calendars, tasks and contacts. For SOGo/mailcow servers
-      both are usually <code>https://&lt;mail-host&gt;/SOGo/dav/&lt;email&gt;/</code>. Leave them
-      empty for mail only. Google accounts need no DAV URLs: use "Connect Google account".</p>
-    <p class="hint">A test login runs before anything is saved.</p>
-    <div class="actions">
-      <button type="submit" class="primary">{% if account %}Test and save{% else %}Test and add{% endif %}</button>
-      <a href="/admin">Cancel</a>
+  <p class="lede">A test login runs before anything is saved.</p>
+</div>
+{% if error %}<p class="notice notice-bad" role="alert">{{ error }}</p>{% endif %}
+<form method="post" action="{% if account %}/admin/accounts/{{ account.id }}{% else %}/admin/accounts{% endif %}" class="sheet">
+  <input type="hidden" name="csrf" value="{{ csrf }}">
+
+  <fieldset class="form-section">
+    <legend class="section-title">Account</legend>
+    <p class="section-hint">The address Claude will see this mailbox as.</p>
+    <div class="fields">
+      <div class="field span-6">
+        <label for="email">Email</label>
+        <input id="email" name="email" type="email" value="{{ f.email }}" required {% if account %}readonly aria-describedby="email-hint"{% endif %}>
+        {% if account %}<p class="field-hint" id="email-hint">The email identifies the account and cannot be changed.</p>{% endif %}
+      </div>
+      <div class="field span-6">
+        <label for="display_name">Display name <span class="optional">optional</span></label>
+        <input id="display_name" name="display_name" type="text" value="{{ f.display_name }}">
+      </div>
     </div>
-  </form>
-</section>
+  </fieldset>
+
+  <fieldset class="form-section">
+    <legend class="section-title">Incoming mail (IMAP)</legend>
+    <p class="section-hint">Your provider lists these under IMAP or “other mail apps”.</p>
+    <div class="fields">
+      <div class="field span-4">
+        <label for="imap_host">IMAP server</label>
+        <input id="imap_host" name="imap_host" type="text" value="{{ f.imap_host }}" required placeholder="imap.example.com" spellcheck="false" autocapitalize="off">
+      </div>
+      <div class="field span-2">
+        <label for="imap_port">Port</label>
+        <input id="imap_port" name="imap_port" type="number" min="1" max="65535" value="{{ f.imap_port }}" required>
+      </div>
+      <div class="field span-3">
+        <label for="imap_security">Security</label>
+        <select id="imap_security" name="imap_security">
+          <option value="ssl" {% if f.imap_security == "ssl" %}selected{% endif %}>SSL/TLS</option>
+          <option value="starttls" {% if f.imap_security == "starttls" %}selected{% endif %}>STARTTLS</option>
+        </select>
+      </div>
+      <div class="field span-3">
+        <label for="imap_username">Username <span class="optional">optional</span></label>
+        <input id="imap_username" name="imap_username" type="text" value="{{ f.imap_username }}" autocomplete="off" aria-describedby="imap_username-hint" spellcheck="false" autocapitalize="off">
+        <p class="field-hint" id="imap_username-hint">Leave empty to use the email.</p>
+      </div>
+      <div class="field span-6">
+        <label for="password">Password</label>
+        <input id="password" name="password" type="password" value="" autocomplete="new-password" {% if not account %}required{% else %}aria-describedby="password-hint"{% endif %}>
+        {% if account %}<p class="field-hint" id="password-hint">Leave empty to keep the stored password.</p>{% endif %}
+      </div>
+    </div>
+  </fieldset>
+
+  <fieldset class="form-section">
+    <legend class="section-title">Calendar &amp; contacts <span class="optional">optional</span></legend>
+    <div class="section-hint">
+      <p>Fill these in to use calendars, tasks and contacts. For SOGo/mailcow servers
+      both are usually <code>https://&lt;mail-host&gt;/SOGo/dav/&lt;email&gt;/</code>. Leave them
+      empty for mail only.</p>
+      <p>Google accounts need no DAV URLs: use "Connect Google account".</p>
+    </div>
+    <div class="fields">
+      <div class="field span-6">
+        <label for="caldav_url">CalDAV URL</label>
+        <input id="caldav_url" name="caldav_url" type="url" value="{{ f.caldav_url }}" placeholder="https://" spellcheck="false">
+      </div>
+      <div class="field span-6">
+        <label for="carddav_url">CardDAV URL</label>
+        <input id="carddav_url" name="carddav_url" type="url" value="{{ f.carddav_url }}" placeholder="https://" spellcheck="false">
+      </div>
+    </div>
+  </fieldset>
+
+  {#- To add a section, copy a <fieldset class="form-section">: a <legend class="section-title">,
+      an optional <p class="section-hint">, then a <div class="fields"> 6-column grid holding one
+      <div class="field span-N"> (N = 2, 3, 4 or 6) per <label> + input. Example:
+    <fieldset class="form-section">
+      <legend class="section-title">Access level</legend>
+      <p class="section-hint">What Claude may do in this mailbox.</p>
+      <div class="fields">
+        <div class="field span-3"><label for="access">Access</label><select id="access" name="access">…</select></div>
+      </div>
+    </fieldset> -#}
+
+  <div class="form-actions form-actions-end">
+    <a class="btn btn-secondary" href="/admin">Cancel</a>
+    <button type="submit" class="btn btn-primary">{% if account %}Test and save{% else %}Test and add{% endif %}</button>
+  </div>
+</form>
 {% endblock %}

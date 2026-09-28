@@ -147,6 +147,7 @@ def accounts(repo):
             imap_security="ssl",
             secret="p",
             status=AccountStatus.CONNECTED,
+            smtp_host="smtp.example.com",
         )
     repo.upsert(email=G, provider=Provider.GOOGLE, status=AccountStatus.CONNECTED)
 
@@ -211,7 +212,7 @@ async def test_read_only_account_is_refused_and_not_contacted(repo, accounts):
         refs(A, "inbox", 1, 3) + refs(A, "Work", 10) + refs(B, "inbox", 1), read=True
     )
     assert res.updated == 1
-    message = f"account {A} is set to read-only mail access; the owner can change this with the `postroom set-access` command"
+    message = f"account {A} is set to read-only mail access; the owner can change this in the admin UI (the account's access level) or with the `postroom set-access` command"
     assert [(f.account, f.folder, f.uids, f.message) for f in res.failed] == [
         (A, "inbox", [1, 3], message),
         (A, "Work", [10], message),

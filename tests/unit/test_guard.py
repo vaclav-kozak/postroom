@@ -1,17 +1,21 @@
-"""Static guard: the package must never delete mail permanently or send it, and the IMAP
-writes that organise mail (flags, move, trash, create folder) live only in the mail service,
-behind the per-account access level."""
+"""Static guard: the package must never delete mail permanently, SMTP lives only in the
+SMTP client module (behind the "full" access level, checked by the mail service), and the
+IMAP writes that organise mail (flags, move, trash, create folder) live only in the mail
+service, behind the per-account access level."""
 
 import pathlib
 import re
 
 SRC = pathlib.Path(__file__).resolve().parents[2] / "src" / "postroom"
 SERVICE = pathlib.Path("mail") / "service.py"
+SMTP = pathlib.Path("mail") / "smtp.py"
+
+# Only in the SMTP client module.
+SMTP_ONLY = [r"\bsmtplib\b"]
 
 # Never anywhere. A plain EXPUNGE (or CLOSE, which expunges) would also purge messages
 # someone else marked \Deleted; set_flags on the client would replace every flag.
 FORBIDDEN = [
-    r"\bsmtplib\b",
     r"\.delete_messages\(",
     r"\.expunge\(",
     r"(?<!mail)\.set_flags\(",
@@ -56,17 +60,31 @@ def test_no_forbidden_imap_or_smtp_operations():
     assert not offenders, "Forbidden operations found:\n" + "\n".join(offenders)
 
 
+def test_smtp_only_in_the_smtp_module():
+    offenders = _find(SMTP_ONLY, skip=(SMTP,))
+    assert not offenders, "smtplib outside mail/smtp.py:\n" + "\n".join(offenders)
+    assert "import smtplib" in (SRC / SMTP).read_text()
+
+
 def test_organising_writes_only_in_the_mail_service():
     offenders = _find(SERVICE_ONLY, skip=(SERVICE,))
     assert not offenders, "IMAP writes outside the mail service:\n" + "\n".join(offenders)
 
 
-def test_uid_expunge_only_in_the_move_helper():
+def _function(text: str, name: str) -> str:
+    """A top-level function's source: up to the next top-level statement."""
+    body = text[text.index(f"\ndef {name}(") + 1 :]
+    end = re.search(r"\n(?=\S)", body)
+    return body[: end.start()] if end else body
+
+
+def test_uid_expunge_only_in_the_move_and_sent_draft_helpers():
+    """UID EXPUNGE only of the UIDs just moved, or of the one draft just sent."""
     text = (SRC / SERVICE).read_text()
-    body = text[text.index("def _move_uids(") :]
-    body = body[: body.index("\ndef ")]
-    assert text.count(".uid_expunge(") == body.count(".uid_expunge(") == 1
-    assert ".uid_expunge(uids)" in body
+    move, draft = _function(text, "_move_uids"), _function(text, "_expunge_one")
+    assert text.count(".uid_expunge(") == 2
+    assert move.count(".uid_expunge(uids)") == 1
+    assert draft.count(".uid_expunge([uid])") == 1
 
 
 def test_every_select_folder_says_how_it_opens():

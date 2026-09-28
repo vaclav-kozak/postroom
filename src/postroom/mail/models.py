@@ -43,6 +43,15 @@ class AttachmentInfo:
 
 
 @dataclasses.dataclass
+class OutgoingFile:
+    """An attachment of an email being sent (already validated)."""
+
+    filename: str
+    content_type: str
+    data: bytes
+
+
+@dataclasses.dataclass
 class ParsedMessage:
     subject: str
     from_: str
@@ -154,6 +163,25 @@ class DraftResult:
 
     def to_dict(self) -> dict:
         return _json_safe(dataclasses.asdict(self))
+
+
+@dataclasses.dataclass
+class SendResult:
+    """Outcome of a send: the email went out; the rest is bookkeeping around it."""
+
+    account: str
+    message_id: str
+    recipients: int
+    saved_to_sent: bool
+    sent_folder: str | None
+    warnings: list[str] = dataclasses.field(default_factory=list)
+    draft_removed: bool | None = None  # send_draft only
+
+    def to_dict(self) -> dict:
+        d = _json_safe(dataclasses.asdict(self))
+        if self.draft_removed is None:
+            del d["draft_removed"]
+        return d
 
 
 @dataclasses.dataclass(frozen=True)

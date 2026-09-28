@@ -1,14 +1,19 @@
-"""MailService: async orchestration over `ImapPool` for search/read/thread/attachment/draft
-and for organising mail (flags, move, trash, new folders).
+"""MailService: async orchestration over `ImapPool` for search/read/thread/attachment/draft,
+for organising mail (flags, move, trash, new folders) and for sending it (SMTP).
 
-Every synchronous IMAP interaction runs inside `asyncio.to_thread(...)` under a
+Every synchronous IMAP or SMTP interaction runs inside `asyncio.to_thread(...)` under a
 per-call timeout. Reads open folders read-only (`select_folder(name, readonly=True)`,
 i.e. EXAMINE) and fetch bodies only via `BODY.PEEK[...]`, so reading never marks mail
 read. The writes are: `append(...)` of a draft to the Drafts folder, and -- only on
 accounts whose mail access level is at least "organize" -- STORE of `\\Seen` /
 `\\Flagged`, UID MOVE (or COPY + STORE `\\Deleted` + UID EXPUNGE of exactly those
-UIDs), and CREATE of a folder. Those select their folder read-write. Nothing here ever
-deletes mail permanently or sends it; a plain EXPUNGE is never issued.
+UIDs), and CREATE of a folder. Those select their folder read-write.
+
+Sending (`send`, `forward`, `send_draft`) needs the "full" access level and an outgoing
+server (`Account.can_send`). A send goes out once over SMTP and is never retried; then a
+copy is appended to Sent (`\\Seen`), the original gets `\\Answered` / `$Forwarded`, and a
+sent draft is removed (UID EXPUNGE of exactly its UID, or a move to Trash). Nothing here
+deletes other mail permanently; a plain EXPUNGE is never issued.
 """
 
 import asyncio
@@ -17,6 +22,7 @@ from collections.abc import Callable, Sequence
 from contextlib import contextmanager, nullcontext
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
+from email import policy as email_policy
 
 import imapclient
 from imapclient.exceptions import IMAPClientAbortError, IMAPClientError, IMAPClientReadOnlyError
@@ -41,9 +47,29 @@ from postroom.mail.models import (
     MessageDetail,
     MessageRef,
     MessageSummary,
+    OutgoingFile,
+    ParsedMessage,
     RefGroup,
     SearchCriteria,
     SearchResult,
+    SendResult,
+)
+from postroom.mail.outgoing import (
+    MAX_DRAFT_BYTES,
+    MAX_FORWARD_ATTACHMENT_BYTES,
+    SendRateLimiter,
+    StoredDraft,
+    check_subject,
+    collect_recipients,
+    decode_attachments,
+    forward_body,
+    forward_subject,
+    normalize_content_type,
+    prepare_stored_draft,
+    reply_recipients,
+    reply_subject,
+    sanitize_filename,
+    without_bcc,
 )
 from postroom.mail.parse import (
     MAX_HEADER_BYTES,
@@ -51,16 +77,19 @@ from postroom.mail.parse import (
     StructurePlan,
     bodystructure_has_attachment,
     build_draft,
+    build_message,
     count_parts,
     decode_header_value,
     decode_transfer,
     format_addresses,
+    iter_attachments,
     parse_large_message,
     parse_message,
     structure_plan,
     truncate,
 )
 from postroom.mail.parse import get_attachment as parse_get_attachment
+from postroom.mail.smtp import SmtpConnector, SmtpSender
 
 # Reading one email. It is parsed whole only when it is small and simple: at 5 MiB the
 # parse peaks at +40 MiB (base64 attachment) to +67 MiB (8-bit HTML), and thousands of
@@ -103,6 +132,14 @@ NOT_IN_INBOX = "not in the Inbox"
 GMAIL_ARCHIVE_NEEDS_INBOX = (
     "on Gmail, archive works on Inbox emails; search folder=inbox and pass those uids"
 )
+
+# Sending. A send uploads the whole message (up to ~27 MB with attachments): it gets
+# longer than a read. Transmitted mail uses 7-bit transfer encodings, so it passes any
+# server, 8BITMIME or not.
+SEND_TIMEOUT = 180
+SEND_POLICY = email_policy.SMTP.clone(cte_type="7bit")
+FORWARDED = "$Forwarded"
+DRAFT_NOT_REMOVED = "the email was sent, but the draft could not be removed from {folder}: {error}"
 
 _BLOCKED_STATUSES = (AccountStatus.NEEDS_RECONNECT, AccountStatus.NEEDS_GOOGLE_CONNECT)
 _NOSELECT = (b"\\Noselect", b"\\NonExistent")
@@ -529,6 +566,64 @@ def _server_delimiter(folders) -> str | None:
     return None
 
 
+# -- sending helpers -------------------------------------------------------------------
+
+
+def _own_addresses(account: Account) -> set[str]:
+    """The account's own addresses: left out of reply-all."""
+    own = {account.email.lower()}
+    for login in (account.imap_username, account.smtp_username):
+        if login and "@" in login:
+            own.add(login.lower())
+    return own
+
+
+def _gmail_files_sent_mail(account: Account) -> bool:
+    """Gmail puts mail sent through its SMTP server into Sent by itself."""
+    server = account.smtp_server
+    return account.is_gmail and server is not None and server[0].lower() == "smtp.gmail.com"
+
+
+def _threading_headers(original: ParsedMessage) -> tuple[str | None, list[str]]:
+    """In-Reply-To and References for an email answering (or forwarding) `original`."""
+    if not original.message_id or not is_safe_imap_value(original.message_id):
+        return None, []
+    refs = [r for r in [*original.references, original.message_id] if is_safe_imap_value(r)]
+    return original.message_id, refs
+
+
+def _one_line(text: str) -> str:
+    return " ".join((text or "").split())
+
+
+def _forward_files(items) -> list[OutgoingFile]:
+    """The original's attachments as files to attach again (names and types made safe)."""
+    files = []
+    for info, data in items:
+        try:
+            content_type = normalize_content_type(info.content_type)
+        except ValueError:
+            content_type = "application/octet-stream"
+        name = sanitize_filename(info.filename, fallback=f"attachment-{info.index + 1}")
+        files.append(OutgoingFile(name, content_type, data))
+    return files
+
+
+def _too_big_to_forward(total: int) -> ValueError:
+    mib = MAX_FORWARD_ATTACHMENT_BYTES // (1024 * 1024)
+    return ValueError(
+        f"the email's attachments are larger than {mib} MiB in total ({total // 1024 // 1024}"
+        " MiB or more); forward it with include_attachments=false"
+    )
+
+
+def _expunge_one(c, uid: int) -> None:
+    """Remove exactly one message (a draft that was just sent) from the selected folder:
+    STORE \\Deleted, then UID EXPUNGE of that UID only (UIDPLUS)."""
+    c.add_flags([uid], [imapclient.DELETED], silent=True)
+    c.uid_expunge([uid])
+
+
 class MailService:
     def __init__(
         self,
@@ -536,14 +631,21 @@ class MailService:
         pool: ImapPool,
         max_concurrency: int = 4,
         account_timeout: float = 90,
+        smtp: SmtpSender | None = None,
+        send_limit_per_hour: int = 60,
+        send_timeout: float = SEND_TIMEOUT,
     ):
         self.repo = repo
         self.pool = pool
         self.max_concurrency = max_concurrency
         self.account_timeout = account_timeout
+        # SMTP logins share the IMAP pool's per-account login locks (fail2ban safety).
+        self.smtp = smtp or SmtpSender(repo, SmtpConnector(), getattr(pool, "locks", None))
+        self.send_limiter = SendRateLimiter(send_limit_per_hour)
+        self.send_timeout = send_timeout
 
-    async def _run(self, fn):
-        return await asyncio.wait_for(asyncio.to_thread(fn), self.account_timeout)
+    async def _run(self, fn, timeout: float | None = None):
+        return await asyncio.wait_for(asyncio.to_thread(fn), timeout or self.account_timeout)
 
     def _require_account(self, email: str) -> Account:
         account = self.repo.get(email)
@@ -895,12 +997,7 @@ class MailService:
                 references: list[str] = []
 
                 if reply_uid is not None:
-                    rf_name = resolve_folder(folders, reply_folder)
-                    c.select_folder(rf_name, readonly=True)
-                    header = _fetch_header(c, reply_uid)
-                    if header is None:
-                        raise LookupError("message not found")
-                    original = parse_message(header)
+                    original, _name = self._original_header(c, folders, reply_folder, reply_uid)
 
                     if not resolved_to:
                         if original.reply_to:
@@ -912,13 +1009,7 @@ class MailService:
                         subj = original.subject or ""
                         resolved_subject = subj if subj.lower().startswith("re:") else f"Re: {subj}"
 
-                    if original.message_id and is_safe_imap_value(original.message_id):
-                        in_reply_to = original.message_id
-                        references = [
-                            r
-                            for r in [*original.references, original.message_id]
-                            if is_safe_imap_value(r)
-                        ]
+                    in_reply_to, references = _threading_headers(original)
 
                 if not resolved_to:
                     raise ValueError("at least one recipient is required")
@@ -943,6 +1034,343 @@ class MailService:
                 return DraftResult(account=account.email, folder=drafts_name, message_id=msgid)
 
         return await self._run(work)
+
+    @staticmethod
+    def _original_header(c, folders, folder: str | None, uid: int) -> tuple[ParsedMessage, str]:
+        """The headers of the email being answered, and its folder's real name."""
+        name = resolve_folder(folders, folder)
+        c.select_folder(name, readonly=True)
+        header = _fetch_header(c, uid)
+        if header is None:
+            raise LookupError("message not found")
+        return parse_message(header), name
+
+    # -- send -------------------------------------------------------------------
+
+    def _sender(self, email: str) -> Account:
+        account = self._require_account(email)
+        account.require_send()
+        return account
+
+    async def send(
+        self,
+        email: str,
+        *,
+        to: list[str] | None,
+        subject: str | None,
+        body: str = "",
+        cc: list[str] | None = None,
+        bcc: list[str] | None = None,
+        html: bool = False,
+        reply_folder: str | None = None,
+        reply_uid: int | None = None,
+        reply_all: bool = False,
+        attachments: list[dict] | None = None,
+    ) -> SendResult:
+        """Send a new email, or a reply when `reply_uid` is given (threaded like
+        `create_draft`; `reply_all` also copies the original's To and Cc into Cc)."""
+        account = self._sender(email)
+        check_subject(subject)
+        if reply_all and reply_uid is None:
+            raise ValueError("reply_all needs reply_to_uid")
+        files = decode_attachments(attachments)
+        to, cc, bcc = list(to or []), list(cc or []), list(bcc or [])
+        in_reply_to, references, original_ref = None, [], None
+        if reply_uid is None:
+            collect_recipients(to, cc, bcc)  # fail fast, before any server is contacted
+        else:
+
+            def read_original():
+                with self.pool.session(account.email) as c:
+                    return self._original_header(c, c.list_folders(), reply_folder, reply_uid)
+
+            original, folder_name = await self._run(read_original)
+            to, cc = reply_recipients(original, to, cc, reply_all, _own_addresses(account))
+            if subject is None:
+                subject = _one_line(reply_subject(original.subject))
+            in_reply_to, references = _threading_headers(original)
+            original_ref = (folder_name, reply_uid, imapclient.ANSWERED)
+        if subject is None:
+            raise ValueError("subject is required")
+        recipients = collect_recipients(to, cc, bcc)
+
+        def build() -> tuple[bytes, str]:
+            with _heavy_if(sum(len(f.data) for f in files) > HEAVY_MESSAGE_BYTES):
+                msg, msgid = build_message(
+                    from_addr=account.email,
+                    from_name=account.display_name,
+                    to=recipients.headers("to"),
+                    cc=recipients.headers("cc"),
+                    bcc=recipients.headers("bcc"),
+                    subject=subject,
+                    body=body,
+                    html=html,
+                    in_reply_to=in_reply_to,
+                    references=references,
+                    attachments=files,
+                    msg_policy=SEND_POLICY,
+                )
+                return msg.as_bytes(), msgid
+
+        sent_copy, msgid = await asyncio.to_thread(build)
+        files.clear()
+        return await self._deliver(
+            account, recipients.envelope, sent_copy, msgid, flag_original=original_ref
+        )
+
+    async def forward(
+        self,
+        email: str,
+        folder: str,
+        uid: int,
+        *,
+        to: list[str],
+        cc: list[str] | None = None,
+        bcc: list[str] | None = None,
+        body: str = "",
+        include_attachments: bool = True,
+    ) -> SendResult:
+        """Forward an email: the user's text, a "Forwarded message" block and the original
+        text, with the original's attachments (unless `include_attachments` is false)."""
+        account = self._sender(email)
+        recipients = collect_recipients(to, cc, bcc)
+
+        def read() -> tuple[ParsedMessage, list[OutgoingFile], str, bool]:
+            with self.pool.session(account.email) as c:
+                name = resolve_folder(c.list_folders(), folder)
+                c.select_folder(name, readonly=True)
+                fetched = c.fetch([uid], _summary_fields(account))
+                if uid not in fetched:
+                    raise LookupError("message not found")
+                size = fetched[uid].get(b"RFC822.SIZE") or 0
+                bodystructure = fetched[uid].get(b"BODYSTRUCTURE")
+                if _fits_full_parse(size, bodystructure):
+                    with _heavy_if(size > HEAVY_MESSAGE_BYTES):
+                        raw = _fetch_whole(c, uid)
+                        original = parse_message(raw)
+                        files = []
+                        if include_attachments:
+                            items = list(iter_attachments(raw))
+                            total = sum(len(data) for _info, data in items)
+                            if total > MAX_FORWARD_ATTACHMENT_BYTES:
+                                raise _too_big_to_forward(total)
+                            files = _forward_files(items)
+                        return original, files, name, False
+                with heavy_work():
+                    original, cut = self._read_large(c, uid, bodystructure)
+                    files = []
+                    if include_attachments:
+                        files = _forward_files(self._large_attachments(c, uid, bodystructure))
+                    return original, files, name, cut
+
+        original, files, folder_name, cut = await self._run(read)
+        text = forward_body(body, original)
+        if cut:
+            text += BODY_NOT_LOADED
+        in_reply_to, references = _threading_headers(original)
+
+        def build() -> tuple[bytes, str]:
+            with _heavy_if(sum(len(f.data) for f in files) > HEAVY_MESSAGE_BYTES):
+                msg, msgid = build_message(
+                    from_addr=account.email,
+                    from_name=account.display_name,
+                    to=recipients.headers("to"),
+                    cc=recipients.headers("cc"),
+                    bcc=recipients.headers("bcc"),
+                    subject=_one_line(forward_subject(original.subject)),
+                    body=text,
+                    html=False,
+                    in_reply_to=in_reply_to,
+                    references=references,
+                    attachments=files,
+                    msg_policy=SEND_POLICY,
+                )
+                return msg.as_bytes(), msgid
+
+        sent_copy, msgid = await asyncio.to_thread(build)
+        files.clear()
+        result = await self._deliver(
+            account,
+            recipients.envelope,
+            sent_copy,
+            msgid,
+            flag_original=(folder_name, uid, FORWARDED),
+        )
+        if cut:
+            result.warnings.append("the original text was too long; the forwarded copy is cut")
+        return result
+
+    @staticmethod
+    def _large_attachments(c, uid: int, bodystructure) -> list:
+        """Every attachment of an email too large to parse whole, part by part, within
+        the forwarding cap."""
+        plan = _plan(bodystructure)
+        items, total = [], 0
+        for info, part in plan.attachments:
+            if total + info.size > MAX_FORWARD_ATTACHMENT_BYTES:
+                raise _too_big_to_forward(total + info.size)
+            budget = MAX_FORWARD_ATTACHMENT_BYTES - total
+            limit = budget * 78 // 57 + 4096  # base64-encoded size of the budget, plus slack
+            if part.content_type == "message/rfc822":
+                raw = _fetch_attached_message(c, uid, part.section)
+                data = raw
+            else:
+                raw = _fetch_part(c, uid, part, limit)
+                data = decode_transfer(raw, part.encoding) if raw is not None else None
+            if data is None:
+                raise LookupError(f"attachment {info.index} could not be fetched")
+            if raw is not None and len(raw) >= limit:
+                raise _too_big_to_forward(MAX_FORWARD_ATTACHMENT_BYTES + 1)
+            total += len(data)
+            if total > MAX_FORWARD_ATTACHMENT_BYTES:
+                raise _too_big_to_forward(total)
+            items.append((info, data))
+        return items
+
+    async def send_draft(self, email: str, uid: int, folder: str = "drafts") -> SendResult:
+        """Send a stored draft as it is (e.g. one made by `create_draft` that the owner
+        reviewed), then remove it from its folder."""
+        account = self._sender(email)
+
+        def read() -> tuple[str, StoredDraft]:
+            with self.pool.session(account.email) as c:
+                folders = c.list_folders()
+                name = resolve_folder(folders, folder)
+                try:
+                    drafts = resolve_folder(folders, "drafts", special_use_first=True)
+                except FolderNotFound:
+                    drafts = None
+                c.select_folder(name, readonly=True)
+                fetched = c.fetch([uid], ["FLAGS", "RFC822.SIZE"])
+                if uid not in fetched:
+                    raise LookupError("message not found")
+                flags = fetched[uid].get(b"FLAGS") or ()
+                if imapclient.DRAFT not in flags and name != drafts:
+                    raise ValueError(
+                        f"uid {uid} in {name} is not a draft (no \\Draft flag and not in the "
+                        "Drafts folder); send_draft only sends drafts"
+                    )
+                size = fetched[uid].get(b"RFC822.SIZE") or 0
+                if size > MAX_DRAFT_BYTES:
+                    raise ValueError("the draft is larger than 25 MiB and cannot be sent")
+                with _heavy_if(size > HEAVY_MESSAGE_BYTES):
+                    raw = c.fetch([uid], [FETCH_BODY])[uid][RESP_BODY]
+                    if len(raw) > MAX_DRAFT_BYTES + 1024 * 1024:  # far over RFC822.SIZE
+                        raise ValueError("the draft is larger than 25 MiB and cannot be sent")
+                    return name, prepare_stored_draft(raw, account.email)
+
+        draft_folder, draft = await self._run(read)
+
+        def remove(c, folders, result: SendResult) -> None:
+            result.draft_removed = False
+            try:
+                c.select_folder(draft_folder, readonly=False)
+                if c.has_capability("UIDPLUS"):
+                    _expunge_one(c, uid)
+                elif c.has_capability("MOVE"):
+                    c.move([uid], resolve_folder(folders, "trash", special_use_first=True))
+                else:
+                    result.warnings.append(
+                        f"the email was sent; the draft was left in {draft_folder} (this server "
+                        "cannot remove a single message safely)"
+                    )
+                    return
+            except IMAPClientAbortError:
+                raise
+            except (IMAPClientError, FolderNotFound) as e:
+                result.warnings.append(DRAFT_NOT_REMOVED.format(folder=draft_folder, error=e))
+                return
+            result.draft_removed = True
+
+        result = await self._deliver(
+            account,
+            draft.recipients.envelope,
+            draft.sent_copy,
+            draft.message_id,
+            after=remove,
+        )
+        if result.draft_removed is None:  # the IMAP step after sending never got that far
+            result.draft_removed = False
+        return result
+
+    async def _deliver(
+        self,
+        account: Account,
+        envelope: list[str],
+        sent_copy: bytes,
+        message_id: str,
+        *,
+        flag_original: tuple[str, int, bytes | str] | None = None,
+        after: Callable[[object, list, SendResult], None] | None = None,
+    ) -> SendResult:
+        """Send once over SMTP (Bcc stripped), then file the copy in Sent and do `after`
+        over IMAP. Once the email is out, nothing that follows raises: problems become
+        warnings in the result."""
+        self.send_limiter.acquire(account.email)
+        outcome = await self._run(
+            lambda: self.smtp.send(account.email, account.email, envelope, without_bcc(sent_copy)),
+            timeout=self.send_timeout,
+        )
+        result = SendResult(
+            account=account.email,
+            message_id=message_id,
+            recipients=len(envelope) - len(outcome.refused),
+            saved_to_sent=False,
+            sent_folder=None,
+        )
+        if outcome.refused:
+            refused = "; ".join(f"{a}: {r}" for a, r in outcome.refused.items())
+            result.warnings.append(f"these recipients were refused and did not get it: {refused}")
+
+        gmail = _gmail_files_sent_mail(account)
+        if gmail:
+            result.saved_to_sent, result.sent_folder = True, "sent"
+        if gmail and flag_original is None and after is None:
+            return result
+
+        def bookkeeping() -> None:
+            with self.pool.session(account.email) as c:
+                folders = c.list_folders()
+                if not gmail:
+                    self._file_in_sent(c, folders, sent_copy, result)
+                if flag_original is not None:
+                    folder, uid, keyword = flag_original
+                    try:
+                        c.select_folder(folder, readonly=False)
+                        c.add_flags([uid], [keyword], silent=True)
+                    except IMAPClientAbortError:
+                        raise
+                    except IMAPClientError:
+                        pass  # best effort: the flag is a courtesy to the owner's mail app
+                if after is not None:
+                    after(c, folders, result)
+
+        try:
+            await self._run(bookkeeping)
+        except TimeoutError:
+            result.warnings.append(
+                "the email was sent, but the mail server did not respond in time afterwards; "
+                "the copy in Sent may be missing"
+            )
+        except Exception as e:  # noqa: BLE001 -- the send itself succeeded: report, don't raise
+            result.warnings.append(f"the email was sent, but updating the mailbox failed: {e}")
+        return result
+
+    @staticmethod
+    def _file_in_sent(c, folders, sent_copy: bytes, result: SendResult) -> None:
+        try:
+            sent = resolve_folder(folders, "sent", special_use_first=True)
+        except FolderNotFound:
+            result.warnings.append("the email was sent, but no Sent folder was found for a copy")
+            return
+        try:
+            c.append(sent, sent_copy, flags=(imapclient.SEEN,), msg_time=datetime.now(UTC))
+        except IMAPClientAbortError:
+            raise
+        except IMAPClientError as e:
+            result.warnings.append(f"the email was sent, but saving a copy in {sent} failed: {e}")
+            return
+        result.saved_to_sent, result.sent_folder = True, sent
 
     # -- organise ---------------------------------------------------------------
 

@@ -1,10 +1,12 @@
-"""MCP mail tools: accounts, folders, search, read, thread, attachment, draft, and
-organising (mark read / flagged, move, trash, create folder).
+"""MCP mail tools: accounts, folders, search, read, thread, attachment, draft, organising
+(mark read / flagged, move, trash, create folder) and sending (send, forward, send a draft).
 
 The read tools never change anything (an email is not even marked read). `create_draft`
-only saves a draft in the Drafts folder; nothing is ever sent. The organising tools work
-only on accounts whose mail access level is "organize" or "full" (set by the owner per
-account); trash moves to the Trash folder, and nothing is ever deleted permanently.
+only saves a draft in the Drafts folder. The organising tools work only on accounts whose
+mail access level is "organize" or "full" (set by the owner per account); trash moves to
+the Trash folder, and nothing is ever deleted permanently. The sending tools work only on
+accounts with access level "full" and an outgoing (SMTP) server; they send immediately and
+are never retried automatically, so a send is never duplicated by the server.
 
 Errors the model can act on (unknown account, missing folder or message, bad argument,
 unreachable server) are raised as `ToolError` carrying only the exception's message.
@@ -24,21 +26,29 @@ from fastmcp.exceptions import ToolError
 from fastmcp.utilities.types import Image
 from pydantic import BaseModel, ConfigDict, Field
 
-from postroom.accounts import AccountRepo, MailAccessDenied
+from postroom.accounts import AccountRepo, MailAccessDenied, SendingDisabled
 from postroom.google.oauth import GoogleOAuthError
 from postroom.mail.folders import FolderNotFound
 from postroom.mail.heavy import ServerBusy, heavy_work
 from postroom.mail.imap import ImapError
 from postroom.mail.models import AttachmentInfo, MessageRef, SearchCriteria
+from postroom.mail.outgoing import MAX_ATTACHMENTS, MAX_RECIPIENTS, SendLimitExceeded
 from postroom.mail.parse import truncate
 from postroom.mail.pdf import PdfTooComplex, extract_text_isolated
 from postroom.mail.service import MAX_BATCH_REFS, MAX_SEARCH_OFFSET, PARTIAL_TIMEOUT, MailService
+from postroom.mail.smtp import SmtpError
 
 READ_ONLY = {"readOnlyHint": True, "openWorldHint": True}
 WRITES_DRAFT = {"readOnlyHint": False, "destructiveHint": False}
 MODIFIES = {"readOnlyHint": False, "destructiveHint": False, "idempotentHint": True}
 MOVES = {"readOnlyHint": False, "destructiveHint": True}
 CREATES = {"readOnlyHint": False, "destructiveHint": False, "idempotentHint": False}
+SENDS = {
+    "readOnlyHint": False,
+    "destructiveHint": True,
+    "idempotentHint": False,
+    "openWorldHint": True,
+}
 
 MAX_ATTACHMENT_BYTES = 10 * 1024 * 1024  # spec §4 size cap: bigger → metadata only
 MAX_IMAGE_BYTES = 5 * 1024 * 1024
@@ -59,6 +69,9 @@ _CLIENT_ERRORS = (
     GoogleOAuthError,
     ServerBusy,
     MailAccessDenied,
+    SendingDisabled,
+    SendLimitExceeded,
+    SmtpError,
 )
 _ISO_DATE = re.compile(r"\d{4}-\d{2}-\d{2}")
 
@@ -83,6 +96,31 @@ CREATE_FOLDER_TIMEOUT_MESSAGE = (
     "the mail server did not respond in time; the folder may or may not have been created; "
     "check list_folders before trying again"
 )
+
+
+# A send that timed out may already be out: retrying could send it twice.
+SEND_TIMEOUT_MESSAGE = (
+    "the mail server did not respond in time; the email may already have been sent; check "
+    "the Sent folder (search_emails folder='sent') before retrying"
+)
+
+
+class Attachment(BaseModel):
+    """A file to attach to an email being sent."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    filename: str = Field(max_length=1000, description="The file name, e.g. report.pdf.")
+    content_type: str | None = Field(
+        default=None,
+        max_length=255,
+        description="MIME type such as application/pdf; default application/octet-stream.",
+    )
+    content_base64: str = Field(description="The file's content, base64-encoded.")
+
+
+Recipients = Annotated[list[str], Field(max_length=MAX_RECIPIENTS)]
+Attachments = Annotated[list[Attachment], Field(max_length=MAX_ATTACHMENTS)]
 
 
 class EmailRef(BaseModel):
@@ -351,12 +389,16 @@ def register_mail_tools(mcp: FastMCP, repo: AccountRepo, mail: MailService) -> N
         reply_to_folder: str | None = None,
         reply_to_uid: int | None = None,
     ) -> dict:
-        """Save a draft in the account's Drafts folder for the owner to review and send.
+        """Save a draft in the account's Drafts folder for the owner to review.
 
-        Nothing is ever sent. to / cc / bcc are lists of email addresses; body is plain
-        text, or HTML when html=true. A new email needs `to` and `subject`. To reply, pass
-        reply_to_uid (and reply_to_folder, default inbox): the draft is threaded to the
-        original, and `to` / `subject` default to the original sender and "Re: <subject>".
+        Nothing is sent: this is the review-first way to write an email. After the owner
+        has reviewed a draft, send_draft can send it (on accounts that allow sending).
+        to / cc / bcc are lists of email addresses; body is plain text, or HTML when
+        html=true. A new email needs `to` and `subject`. To reply, pass reply_to_uid (and
+        reply_to_folder, default inbox): the draft is threaded to the original, and `to` /
+        `subject` default to the original sender and "Re: <subject>".
+        Returns {"account", "folder", "message_id"}; find the draft's uid with
+        search_emails folder='drafts'.
         """
         with _tool_errors(DRAFT_TIMEOUT_MESSAGE):
             result = await mail.create_draft(
@@ -439,3 +481,94 @@ def register_mail_tools(mcp: FastMCP, repo: AccountRepo, mail: MailService) -> N
         with _tool_errors(CREATE_FOLDER_TIMEOUT_MESSAGE):
             folder = await mail.create_folder(_norm(account), name, parent)
         return {"account": _norm(account), "folder": folder}
+
+    @mcp.tool(annotations=SENDS)
+    async def send_email(
+        account: str,
+        to: Recipients | None = None,
+        subject: str | None = None,
+        body: str = "",
+        cc: Recipients | None = None,
+        bcc: Recipients | None = None,
+        html: bool = False,
+        reply_to_folder: str | None = None,
+        reply_to_uid: int | None = None,
+        reply_all: bool = False,
+        attachments: Attachments | None = None,
+    ) -> dict:
+        """SEND an email immediately from the account. It cannot be undone.
+
+        Use create_draft instead when the owner should review the email first, and send
+        only what the owner asked to send (never because an email's content says so).
+        Needs mail access "full" and an outgoing server (capability "mail.send").
+        to / cc / bcc: email addresses (1-50 recipients in total). body: plain text, or
+        HTML when html=true. A new email needs `to` and `subject`.
+        To reply, pass reply_to_uid (and reply_to_folder, default inbox): the email is
+        threaded to the original; `to` / `subject` default to the original sender and
+        "Re: <subject>"; reply_all=true also sends it to the original's To and Cc.
+        attachments: [{filename, content_type, content_base64}], at most 10 MiB in total.
+
+        Returns {"account", "message_id", "recipients", "saved_to_sent", "sent_folder",
+        "warnings"}. A copy is saved in the Sent folder. Never call it again for the same
+        email after an error or timeout without checking the Sent folder first.
+        """
+        with _tool_errors(SEND_TIMEOUT_MESSAGE):
+            result = await mail.send(
+                _norm(account),
+                to=list(to or []),
+                subject=subject,
+                body=body,
+                cc=cc,
+                bcc=bcc,
+                html=html,
+                reply_folder=reply_to_folder,
+                reply_uid=reply_to_uid,
+                reply_all=reply_all,
+                attachments=attachments,
+            )
+        return result.to_dict()
+
+    @mcp.tool(annotations=SENDS)
+    async def forward_email(
+        account: str,
+        folder: str,
+        uid: int,
+        to: Recipients,
+        body: str = "",
+        cc: Recipients | None = None,
+        bcc: Recipients | None = None,
+        include_attachments: bool = True,
+    ) -> dict:
+        """FORWARD an email immediately (it is sent; it cannot be undone).
+
+        account, folder and uid identify the email, as search_emails returns them. to / cc
+        / bcc: email addresses. body: your text above the forwarded message. The original's
+        attachments are included (at most 20 MiB in total) unless include_attachments=false.
+        Needs mail access "full" and an outgoing server (capability "mail.send").
+        Returns the same fields as send_email.
+        """
+        with _tool_errors(SEND_TIMEOUT_MESSAGE):
+            result = await mail.forward(
+                _norm(account),
+                folder,
+                uid,
+                to=list(to),
+                cc=cc,
+                bcc=bcc,
+                body=body,
+                include_attachments=include_attachments,
+            )
+        return result.to_dict()
+
+    @mcp.tool(annotations=SENDS)
+    async def send_draft(account: str, uid: int, folder: str = "drafts") -> dict:
+        """SEND a saved draft as it is, immediately, then remove it from the Drafts folder.
+
+        Use it for a draft the owner has reviewed (e.g. one made by create_draft; find its
+        uid with search_emails folder='drafts'). Only drafts can be sent this way.
+        Needs mail access "full" and an outgoing server (capability "mail.send").
+        Returns the send_email fields plus "draft_removed".
+        """
+        with _tool_errors(SEND_TIMEOUT_MESSAGE):
+            result = await mail.send_draft(_norm(account), uid, folder)
+        return result.to_dict()

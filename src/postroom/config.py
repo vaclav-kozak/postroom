@@ -24,6 +24,8 @@ class Settings(BaseSettings):
     # Comma-separated IPs/CIDRs of reverse proxies whose X-Forwarded-For / X-Real-IP /
     # X-Forwarded-Proto headers are believed. From any other peer these headers are dropped.
     trusted_proxies: str = "127.0.0.1,::1"
+    # Emails one account may send per hour (send_email, forward_email, send_draft); 0 = no limit.
+    send_limit_per_hour: int = 60
 
     @property
     def redirect_hosts(self) -> tuple[str, ...]:

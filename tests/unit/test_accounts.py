@@ -108,6 +108,7 @@ def test_capabilities(repo):
         imap_security="ssl",
         caldav_url="https://h/SOGo/dav/s@x.cz/",
         carddav_url="https://h/SOGo/dav/s@x.cz/",
+        smtp_host="smtp.example.org",
     )
     assert s.capabilities == [
         "mail",
@@ -124,7 +125,9 @@ def test_capabilities(repo):
         imap_port=143,
         imap_security="starttls",
     )
-    assert f.capabilities == ["mail", "mail.organize", "mail.send"] and not f.is_gmail
+    # No outgoing server: no sending, whatever the access level.
+    assert f.capabilities == ["mail", "mail.organize"] and not f.is_gmail
+    assert f.mail_access == "full" and not f.can_send
 
 
 def test_mark_connected_is_conditional_on_the_expected_status(repo):

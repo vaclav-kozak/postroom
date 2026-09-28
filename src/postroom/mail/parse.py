@@ -1,8 +1,7 @@
-"""Pure MIME parsing, HTML->text conversion, and draft (RFC 5322) building.
+"""Pure MIME parsing, HTML->text conversion, and message (RFC 5322) building.
 
 No network or IMAP calls live here -- this module only ever touches bytes it
-is handed and returns plain data. It is read-only with respect to mail
-content: it never mutates or sends anything.
+is handed and returns plain data; it never sends anything itself.
 """
 
 import binascii
@@ -13,6 +12,7 @@ import email.parser
 import email.utils
 import quopri
 import re
+from collections.abc import Sequence
 from datetime import UTC, datetime
 from email import policy
 from email.headerregistry import Address as HeaderAddress
@@ -23,7 +23,7 @@ from bs4 import BeautifulSoup
 from markdownify import MarkdownConverter
 
 from postroom.mail.heavy import heavy_work
-from postroom.mail.models import AttachmentInfo, ParsedMessage
+from postroom.mail.models import AttachmentInfo, OutgoingFile, ParsedMessage
 
 _ATTACHMENT_MAINTYPES = {b"application", b"image", b"audio", b"video"}
 
@@ -677,7 +677,23 @@ def parse_large_message(
     return _with_headers(msg, body_text, body_source, [info for info, _ in plan.attachments])
 
 
-def build_draft(
+def _attach(msg: EmailMessage, f: OutgoingFile) -> None:
+    """Add one attachment. An attached email (message/rfc822) is embedded as a message,
+    which is how RFC 2046 wants it (never base64); anything unusable becomes bytes."""
+    maintype, _, subtype = f.content_type.partition("/")
+    if f.content_type == "message/rfc822":
+        try:
+            inner = email.message_from_bytes(_cap_header(f.data), policy=policy.default)
+            msg.add_attachment(inner, filename=f.filename)
+            return
+        except (RecursionError, ValueError, TypeError):
+            maintype, subtype = "application", "octet-stream"
+    if maintype in ("multipart", "message"):
+        maintype, subtype = "application", "octet-stream"
+    msg.add_attachment(f.data, maintype=maintype, subtype=subtype, filename=f.filename)
+
+
+def build_message(
     *,
     from_addr: str,
     from_name: str | None,
@@ -689,13 +705,16 @@ def build_draft(
     html: bool,
     in_reply_to: str | None,
     references: list[str],
-) -> tuple[bytes, str]:
-    """Build an RFC 5322 draft message (CRLF bytes) and return it with its Message-ID.
+    attachments: Sequence[OutgoingFile] = (),
+    msg_policy: policy.EmailPolicy = policy.SMTP,
+) -> tuple[EmailMessage, str]:
+    """Build an RFC 5322 message and return it with its Message-ID.
 
-    Bcc is intentionally kept in the built message: the owner sends drafts from
-    their own mail client, which is responsible for stripping Bcc on send.
+    Bcc is kept as a header: a draft or a Sent copy carries it, and whoever transmits the
+    message must remove it first (`MailService.send` does; so does the owner's mail app
+    when it sends a draft).
     """
-    msg = EmailMessage(policy=policy.SMTP)
+    msg = EmailMessage(policy=msg_policy)
     msg["From"] = HeaderAddress(display_name=from_name or "", addr_spec=from_addr)
     if to:
         msg["To"] = ", ".join(to)
@@ -717,5 +736,49 @@ def build_draft(
         msg.add_alternative(body, subtype="html")
     else:
         msg.set_content(body)
+    for f in attachments:
+        _attach(msg, f)
+    return msg, msgid
 
+
+def build_draft(
+    *,
+    from_addr: str,
+    from_name: str | None,
+    to: list[str],
+    cc: list[str],
+    bcc: list[str],
+    subject: str,
+    body: str,
+    html: bool,
+    in_reply_to: str | None,
+    references: list[str],
+) -> tuple[bytes, str]:
+    """Build a draft (CRLF bytes, Bcc kept for the owner's mail app) and its Message-ID."""
+    msg, msgid = build_message(
+        from_addr=from_addr,
+        from_name=from_name,
+        to=to,
+        cc=cc,
+        bcc=bcc,
+        subject=subject,
+        body=body,
+        html=html,
+        in_reply_to=in_reply_to,
+        references=references,
+    )
     return msg.as_bytes(), msgid
+
+
+def iter_attachments(raw: bytes):
+    """(AttachmentInfo, payload) for every attachment of a whole message, in the same order
+    and with the same indexes as `parse_message` lists them."""
+    raw = _cap_header(raw)
+    try:
+        msg = email.message_from_bytes(raw, policy=policy.default)
+        items = list(_iter_attachment_parts(msg))
+    except RecursionError:
+        raise ValueError("the email is too deeply nested to read its attachments") from None
+    for idx, filename, content_type, payload, inline, charset in items:
+        info = AttachmentInfo(idx, filename, content_type, len(payload), inline, charset)
+        yield info, payload

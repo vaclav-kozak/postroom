@@ -19,6 +19,20 @@ class AccountStatus(StrEnum):
     NEEDS_GOOGLE_CONNECT = "needs_google_connect"
 
 
+class SmtpStatus(StrEnum):
+    """The last SMTP login's outcome (None: never tried). Separate from `AccountStatus`,
+    which is about IMAP: an account can read mail fine while its SMTP login fails."""
+
+    OK = "ok"
+    ERROR = "error"
+    AUTH_FAILED = "auth_failed"
+
+
+# Google accounts send through Gmail's SMTP server with the account's OAuth access token
+# (XOAUTH2); the https://mail.google.com/ scope covers SMTP as well as IMAP.
+GMAIL_SMTP = ("smtp.gmail.com", 465, "ssl")
+
+
 class MailAccess(StrEnum):
     """What the MCP tools may do with an account's mail. Each level includes the ones before.
 
@@ -43,14 +57,24 @@ _ACCESS_LABEL = {
 }
 
 
+ACCESS_HINT = (
+    "the owner can change this in the admin UI (the account's access level) "
+    "or with the `postroom set-access` command"
+)
+
+
 class MailAccessDenied(Exception):
     """A mail operation needs a higher access level than the account allows."""
 
     def __init__(self, email: str, level: MailAccess):
         super().__init__(
-            f"account {email} is set to {_ACCESS_LABEL[level]} mail access; "
-            "the owner can change this with the `postroom set-access` command"
+            f"account {email} is set to {_ACCESS_LABEL[level]} mail access; {ACCESS_HINT}"
         )
+
+
+class SendingDisabled(Exception):
+    """The account may not send mail: its access level is below "full", or it has no
+    outgoing (SMTP) server."""
 
 
 @dataclass(frozen=True)
@@ -74,6 +98,14 @@ class Account:
     # Fail closed: an Account built without a level may only read. Stored accounts always
     # carry theirs (the database default for them is "full").
     mail_access: MailAccess = MailAccess.READ
+    # Outgoing mail (IMAP accounts only; no host = no sending). The password is the IMAP one.
+    smtp_host: str | None = None
+    smtp_port: int | None = None
+    smtp_security: str | None = None
+    smtp_username: str | None = None
+    smtp_status: SmtpStatus | None = None
+    smtp_error: str | None = None
+    smtp_checked_at: int | None = None
 
     @property
     def is_gmail(self) -> bool:
@@ -90,13 +122,46 @@ class Account:
             raise MailAccessDenied(self.email, self.mail_access)
 
     @property
+    def smtp_configured(self) -> bool:
+        """Whether the account has an outgoing mail server (always, for Google accounts)."""
+        return self.provider == Provider.GOOGLE or bool(self.smtp_host)
+
+    @property
+    def smtp_server(self) -> tuple[str, int, str] | None:
+        """(host, port, security) of the outgoing mail server, or None when there is none."""
+        if self.provider == Provider.GOOGLE:
+            return GMAIL_SMTP
+        if not self.smtp_host:
+            return None
+        default_port = 465 if self.smtp_security != "starttls" else 587
+        return self.smtp_host, self.smtp_port or default_port, self.smtp_security or "ssl"
+
+    @property
+    def smtp_login(self) -> str:
+        if self.provider == Provider.GOOGLE:
+            return self.email
+        return self.smtp_username or self.login
+
+    @property
     def can_send(self) -> bool:
         """Whether this account may send mail: the one place that decides it.
 
-        For now only the access level counts; once sending exists it must also require
-        the account's outgoing (SMTP) server to be configured.
+        The access level must be "full" and the account needs an outgoing (SMTP) server.
         """
-        return self.mail_access == MailAccess.FULL
+        return self.mail_access == MailAccess.FULL and self.smtp_configured
+
+    def require_send(self) -> None:
+        """Raise `SendingDisabled` (with the reason) unless `can_send`."""
+        if not self.allows(MailAccess.FULL):
+            raise SendingDisabled(
+                f"sending is disabled for account {self.email} (access level "
+                f"{self.mail_access.value}); {ACCESS_HINT}"
+            )
+        if not self.smtp_configured:
+            raise SendingDisabled(
+                f"SMTP is not configured for account {self.email}; the owner can add the "
+                "outgoing mail server in the admin UI"
+            )
 
     @property
     def capabilities(self) -> list[str]:
@@ -136,6 +201,13 @@ def _row_to_account(row) -> Account:
         last_ok_at=row["last_ok_at"],
         last_check_at=row["last_check_at"],
         mail_access=MailAccess(row["mail_access"]),
+        smtp_host=row["smtp_host"],
+        smtp_port=row["smtp_port"],
+        smtp_security=row["smtp_security"],
+        smtp_username=row["smtp_username"],
+        smtp_status=SmtpStatus(row["smtp_status"]) if row["smtp_status"] else None,
+        smtp_error=row["smtp_error"],
+        smtp_checked_at=row["smtp_checked_at"],
     )
 
 
@@ -174,6 +246,10 @@ class AccountRepo:
         secret: str | None = None,
         status: AccountStatus | None = None,
         mail_access: MailAccess | None = None,
+        smtp_host: str | None = None,
+        smtp_port: int | None = None,
+        smtp_security: str | None = None,
+        smtp_username: str | None = None,
     ) -> Account:
         email = email.strip().lower()
         now = int(time.time())
@@ -189,6 +265,10 @@ class AccountRepo:
             "imap_username": imap_username,
             "caldav_url": caldav_url,
             "carddav_url": carddav_url,
+            "smtp_host": smtp_host,
+            "smtp_port": smtp_port,
+            "smtp_security": smtp_security,
+            "smtp_username": smtp_username,
         }.items():
             if val is not None:
                 columns[col] = val
@@ -279,6 +359,50 @@ class AccountRepo:
                 "UPDATE accounts SET mail_access = ?, updated_at = ? WHERE email = ?",
                 (level.value, int(time.time()), email.strip().lower()),
             )
+        )
+
+    def set_smtp(
+        self,
+        email: str,
+        *,
+        host: str | None,
+        port: int | None = None,
+        security: str | None = None,
+        username: str | None = None,
+    ) -> None:
+        """Replace the account's outgoing mail settings; no host removes them (no sending).
+
+        The last SMTP check result is cleared: it was about the old settings."""
+        if not host:
+            host = port = security = username = None
+        elif security not in ("ssl", "starttls"):
+            raise ValueError(f"invalid SMTP security: {security!r}")
+        self._db.execute(
+            "UPDATE accounts SET smtp_host = ?, smtp_port = ?, smtp_security = ?, "
+            "smtp_username = ?, smtp_status = NULL, smtp_error = NULL, smtp_checked_at = NULL, "
+            "updated_at = ? WHERE email = ?",
+            (host, port, security, username or None, int(time.time()), email.strip().lower()),
+        )
+
+    def set_smtp_status(self, email: str, status: SmtpStatus, error: str | None = None) -> None:
+        """Record the outcome of an SMTP login (the error text must be secret-free)."""
+        now = int(time.time())
+        self._db.execute(
+            "UPDATE accounts SET smtp_status = ?, smtp_error = ?, smtp_checked_at = ?, "
+            "updated_at = ? WHERE email = ?",
+            (
+                SmtpStatus(status).value,
+                None if status == SmtpStatus.OK else (error or "")[:500] or None,
+                now,
+                now,
+                email.strip().lower(),
+            ),
+        )
+
+    def set_display_name(self, email: str, display_name: str | None) -> None:
+        self._db.execute(
+            "UPDATE accounts SET display_name = ?, updated_at = ? WHERE email = ?",
+            (display_name or None, int(time.time()), email.strip().lower()),
         )
 
     def set_enabled(self, email: str, enabled: bool) -> None:

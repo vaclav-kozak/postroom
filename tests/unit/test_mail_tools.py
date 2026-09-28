@@ -83,14 +83,17 @@ async def test_tools_listed(server):
         "move_emails",
         "trash_emails",
         "create_folder",
+        "send_email",
+        "forward_email",
+        "send_draft",
     }
 
 
-async def test_no_send_or_delete_tools(server):
+async def test_no_delete_tools(server):
     mcp, _ = server
     async with Client(mcp) as c:
         names = " ".join(t.name for t in await c.list_tools())
-    for bad in ("send", "delete", "expunge", "purge"):
+    for bad in ("delete", "expunge", "purge"):
         assert bad not in names
 
 
@@ -100,7 +103,8 @@ async def test_list_accounts(server):
         res = await c.call_tool("list_accounts", {})
     acc = res.data[0] if isinstance(res.data, list) else res.structured_content["result"][0]
     assert acc["email"] == "a@x.cz"
-    assert acc["capabilities"] == ["mail", "mail.organize", "mail.send"]
+    # Full access, but no outgoing server configured: no sending.
+    assert acc["capabilities"] == ["mail", "mail.organize"]
     assert acc["mail_access"] == "full"
 
 
@@ -618,7 +622,8 @@ async def test_read_only_account_through_the_tools(repo):
     mcp = _real_server(repo, StubPool({"user@example.com": f}))
     denied = (
         "account user@example.com is set to read-only mail access; "
-        "the owner can change this with the `postroom set-access` command"
+        "the owner can change this in the admin UI (the account's access level) or with the "
+        "`postroom set-access` command"
     )
     async with Client(mcp) as c:
         res = await c.call_tool("mark_emails", {"emails": [SEARCH_RESULT], "read": True})

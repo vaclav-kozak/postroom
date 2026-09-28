@@ -1,7 +1,14 @@
 from fastmcp import Client
 
 from postroom.accounts import AccountStatus, Provider
-from postroom.app import SERVER_INSTRUCTIONS, build_mcp, build_services
+from postroom.app import (
+    MCP_MAX_BODY_BYTES,
+    SERVER_INSTRUCTIONS,
+    build_mcp,
+    build_services,
+    create_app,
+    raise_mcp_body_limit,
+)
 from postroom.google.oauth import GoogleOAuth
 
 READ_TOOLS = {
@@ -13,6 +20,7 @@ READ_TOOLS = {
     "get_attachment",
 }
 ORGANIZE_TOOLS = {"mark_emails", "move_emails", "trash_emails", "create_folder"}
+SEND_TOOLS = {"send_email", "forward_email", "send_draft"}
 
 PIM_TOOLS = {
     "list_calendars",
@@ -47,7 +55,7 @@ async def test_build_mcp_registers_annotated_mail_tools(settings):
     assert mcp.name == "postroom" and mcp.instructions == SERVER_INSTRUCTIONS
     async with Client(mcp) as c:
         tools = {t.name: t for t in await c.list_tools()}
-    assert set(tools) == READ_TOOLS | {"create_draft"} | ORGANIZE_TOOLS | PIM_TOOLS
+    assert set(tools) == READ_TOOLS | {"create_draft"} | ORGANIZE_TOOLS | SEND_TOOLS | PIM_TOOLS
     for name in READ_TOOLS:
         assert tools[name].annotations.read_only_hint is True
         assert tools[name].annotations.open_world_hint is True
@@ -60,6 +68,10 @@ async def test_build_mcp_registers_annotated_mail_tools(settings):
     assert tools["move_emails"].annotations.destructive_hint is True
     assert tools["trash_emails"].annotations.destructive_hint is True
     assert tools["create_folder"].annotations.destructive_hint is False
+    for name in SEND_TOOLS:
+        a = tools[name].annotations
+        assert a.read_only_hint is False and a.destructive_hint is True
+        assert a.idempotent_hint is False and a.open_world_hint is True
 
 
 async def test_unknown_account_is_clean_tool_error(settings):
@@ -114,3 +126,35 @@ async def test_blocked_account_pim_call_is_not_contacted(settings):
         res = await c.call_tool("list_calendars", {"account": "a@x.cz"}, raise_on_error=False)
     assert res.is_error and res.content[0].text == "account unavailable: needs_reconnect"
     assert built == []
+
+
+def test_build_services_wires_smtp(settings):
+    settings.send_limit_per_hour = 7
+    s = build_services(settings)
+    # SMTP logins share the IMAP pool's per-account login locks (fail2ban).
+    assert s.mail.smtp.locks is s.pool.locks
+    assert s.mail.smtp.repo is s.repo
+    assert s.mail.smtp.connector.google_token == s.google.access_token
+    assert s.mail.smtp.connector.local_hostname == "testserver"
+    assert s.mail.send_limiter.per_hour == 7
+
+
+async def test_mcp_request_body_limit_is_raised_for_attachments(settings):
+    settings.public_url = "http://localhost"
+    app = create_app(settings, build_services(settings))
+    async with app.router.lifespan_context(app):
+        route = next(r for r in app.router.routes if getattr(r, "path", None) == "/mcp")
+        node, limiter = route.app, None
+        while node is not None and limiter is None:
+            limiter = getattr(getattr(node, "session_manager", None), "asgi_app", None)
+            node = getattr(node, "app", None)
+        assert limiter is not None
+        assert limiter.max_body_size == MCP_MAX_BODY_BYTES == 16 * 1024 * 1024
+        assert raise_mcp_body_limit(app) is True
+
+
+def test_body_limit_layout_missing_is_logged(caplog):
+    from starlette.applications import Starlette
+
+    assert raise_mcp_body_limit(Starlette()) is False
+    assert "request body limit" in caplog.text

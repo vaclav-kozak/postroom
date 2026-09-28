@@ -7,12 +7,14 @@ start after it tripped. So every call that logs in to an account's mail server h
 account's lock and re-reads the account's status after acquiring it:
 
 - the IMAP pool holds it around `connect()` (a cached session needs no new login);
+- the SMTP sender holds it around its login (`mail/smtp.py`), which counts toward the
+  same fail2ban budget;
 - every CalDAV/CardDAV call holds it for the whole call, since each call logs in afresh
   (`PimService` also queues those calls per account in asyncio, so waiting for a turn
   does not tie up a worker thread).
 
 A wrong password therefore costs exactly one failed login per account, however many
-IMAP and DAV calls are in flight when it is noticed.
+IMAP, SMTP and DAV calls are in flight when it is noticed.
 """
 
 import threading
@@ -24,7 +26,7 @@ class LoginLocks:
         self._guard = threading.Lock()
 
     def account(self, email: str) -> threading.Lock:
-        """The lock serialising logins to `email`'s mail server (IMAP and DAV)."""
+        """The lock serialising logins to `email`'s mail server (IMAP, SMTP and DAV)."""
         key = email.strip().lower()
         with self._guard:
             lock = self._accounts.get(key)

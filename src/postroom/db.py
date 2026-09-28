@@ -3,7 +3,7 @@ import os
 import sqlite3
 import threading
 
-SCHEMA_VERSION = 3
+SCHEMA_VERSION = 4
 
 MIGRATIONS: dict[int, str] = {
     1: """
@@ -76,6 +76,22 @@ MIGRATIONS: dict[int, str] = {
     -- user to approve every non-read-only tool call; the owner can lower it per account.
     ALTER TABLE accounts ADD COLUMN mail_access TEXT NOT NULL DEFAULT 'full'
         CHECK (mail_access IN ('read','organize','full'));
+    """,
+    4: """
+    -- Outgoing mail (SMTP) per IMAP account. No host = sending disabled. The password is the
+    -- IMAP one (secret_enc); smtp_username NULL = the IMAP login. Google accounts need none
+    -- of this: they send through smtp.gmail.com with their OAuth token.
+    ALTER TABLE accounts ADD COLUMN smtp_host TEXT;
+    ALTER TABLE accounts ADD COLUMN smtp_port INTEGER;
+    ALTER TABLE accounts ADD COLUMN smtp_security TEXT CHECK (smtp_security IN ('ssl','starttls'));
+    ALTER TABLE accounts ADD COLUMN smtp_username TEXT;
+    -- The last SMTP login result, kept apart from the IMAP status: only a manual test or a
+    -- send logs in to SMTP. 'auth_failed' stops further sends (the mail server's fail2ban
+    -- counts failed SMTP logins too) until the owner tests the account again.
+    ALTER TABLE accounts ADD COLUMN smtp_status TEXT
+        CHECK (smtp_status IN ('ok','error','auth_failed'));
+    ALTER TABLE accounts ADD COLUMN smtp_error TEXT;
+    ALTER TABLE accounts ADD COLUMN smtp_checked_at INTEGER;
     """,
 }
 

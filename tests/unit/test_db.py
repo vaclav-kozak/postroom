@@ -92,9 +92,36 @@ def test_migration_3_gives_existing_accounts_full_mail_access(tmp_path):
     )
     conn.close()
     db = Database(p)
-    assert db.one("PRAGMA user_version")[0] == SCHEMA_VERSION == 3
+    assert db.one("PRAGMA user_version")[0] == SCHEMA_VERSION == 4
     assert db.one("SELECT mail_access FROM accounts")[0] == "full"
     with pytest.raises(sqlite3.IntegrityError):
         db.execute("UPDATE accounts SET mail_access = 'admin'")
     with pytest.raises(sqlite3.IntegrityError):
         db.execute("UPDATE accounts SET mail_access = NULL")
+
+
+def test_migration_4_adds_smtp_settings_unset(tmp_path):
+    import sqlite3
+
+    from postroom.db import MIGRATIONS
+
+    p = str(tmp_path / "v3.db")
+    conn = sqlite3.connect(p, isolation_level=None)
+    for version in (1, 2, 3):
+        conn.executescript(
+            "BEGIN;" + MIGRATIONS[version] + f"; PRAGMA user_version={version}; COMMIT;"
+        )
+    conn.execute(
+        "INSERT INTO accounts(email, provider, created_at, updated_at)"
+        " VALUES('user@example.com', 'imap', 1, 1)"
+    )
+    conn.close()
+    db = Database(p)
+    row = db.one(
+        "SELECT smtp_host, smtp_port, smtp_security, smtp_username, smtp_status FROM accounts"
+    )
+    assert tuple(row) == (None, None, None, None, None)
+    with pytest.raises(sqlite3.IntegrityError):
+        db.execute("UPDATE accounts SET smtp_security = 'plain'")
+    with pytest.raises(sqlite3.IntegrityError):
+        db.execute("UPDATE accounts SET smtp_status = 'maybe'")

@@ -1,0 +1,68 @@
+name: Bug report
+description: Something does not work as documented.
+labels: [bug]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for the report. **Security vulnerabilities go to a private advisory, not here**
+        (see SECURITY.md). Never paste passwords, tokens, API keys, `.env` contents or real
+        email content; redact addresses and hostnames.
+  - type: textarea
+    id: what
+    attributes:
+      label: What happened?
+      description: What you did, what you expected, and what happened instead.
+    validations:
+      required: true
+  - type: textarea
+    id: steps
+    attributes:
+      label: Steps to reproduce
+      placeholder: |
+        1. ...
+        2. ...
+    validations:
+      required: true
+  - type: input
+    id: version
+    attributes:
+      label: Postroom version
+      description: Image tag or commit, e.g. `1.2.0`, `edge`, `a1b2c3d`.
+    validations:
+      required: true
+  - type: dropdown
+    id: deployment
+    attributes:
+      label: Deployment
+      options:
+        - docker-compose.yml (bundled Caddy)
+        - docker-compose.proxy.yml (own reverse proxy)
+        - Other Docker setup
+        - From source (uv)
+    validations:
+      required: true
+  - type: dropdown
+    id: area
+    attributes:
+      label: Area
+      multiple: true
+      options:
+        - IMAP mail
+        - Google (Gmail / Calendar / Tasks / Contacts)
+        - CalDAV / CardDAV
+        - OAuth / connecting an MCP client
+        - Admin web UI
+        - Installation / Docker / reverse proxy
+        - Other
+  - type: input
+    id: client
+    attributes:
+      label: MCP client
+      description: e.g. Claude (web/desktop), Claude Code, another client and its version.
+  - type: textarea
+    id: logs
+    attributes:
+      label: Relevant logs
+      description: "`docker compose logs postroom`, redacted. Rendered as code."
+      render: text

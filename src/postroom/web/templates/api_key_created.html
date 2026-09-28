@@ -1,12 +1,16 @@
 {% extends "base.html" %}
 {% block title %}API key created · Postroom{% endblock %}
+{% block body_class %}page-narrow{% endblock %}
 {% block content %}
-<section class="card narrow">
+<section class="card card-narrow">
   <h1>API key created</h1>
-  <p>Key <strong>{{ key_name }}</strong>:</p>
-  <code class="secret">{{ key }}</code>
-  <p class="warning">Copy it now — it is not stored and cannot be shown again.</p>
-  <p class="hint">Use it as <code>Authorization: Bearer &lt;key&gt;</code> against {{ mcp_url }}.</p>
-  <p><a href="/admin">Back to admin</a></p>
+  <p class="lede">Key <strong>{{ key_name }}</strong> is ready.</p>
+  <div class="copyfield">
+    <code class="secret" id="new-key">{{ key }}</code>
+    <button type="button" class="btn btn-secondary btn-small copy" data-copy="new-key" hidden>Copy</button>
+  </div>
+  <p class="notice notice-warn">Copy it now — it is not stored and cannot be shown again.</p>
+  <p class="hint">Use it as <code>Authorization: Bearer &lt;key&gt;</code> against <code>{{ mcp_url }}</code>.</p>
+  <p class="form-actions"><a class="btn btn-secondary" href="/admin">Back to admin</a></p>
 </section>
 {% endblock %}

@@ -1,12 +1,15 @@
-"""Public pages: root, robots.txt, health, static CSS, owner login/logout and OAuth consent."""
+"""Public pages: root, robots.txt, health, static assets, owner login/logout and OAuth consent."""
 
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import importlib.resources
 import logging
 import math
+from dataclasses import dataclass
 from datetime import UTC, datetime, tzinfo
+from importlib.resources.abc import Traversable
 from typing import TYPE_CHECKING
 from urllib.parse import quote, urlparse
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
@@ -50,7 +53,48 @@ def _format_ts(value: int | None) -> str:
 
 templates.filters["ts"] = _format_ts
 
-_CSS = importlib.resources.files("postroom.web").joinpath("static/app.css").read_text("utf-8")
+# ----- static assets ------------------------------------------------------------------------
+# Everything under `static/` is read into memory once at import: a fixed map from path to bytes,
+# so a request can never reach outside it (no path traversal, no filesystem access per request).
+# Only known file types are served. Pages reference assets as `/static/<path>?v=<ASSET_VERSION>`,
+# and a versioned URL (or a font, whose file name already pins its face) is cached for a year.
+
+_CONTENT_TYPES = {
+    ".css": "text/css; charset=utf-8",
+    ".js": "text/javascript; charset=utf-8",
+    ".svg": "image/svg+xml",
+    ".woff2": "font/woff2",
+    ".png": "image/png",
+    ".txt": "text/plain; charset=utf-8",
+}
+LONG_CACHE = "public, max-age=31536000, immutable"
+SHORT_CACHE = "public, max-age=3600"
+
+
+@dataclass(frozen=True)
+class StaticAsset:
+    body: bytes
+    media_type: str
+
+
+def _walk(node: Traversable, prefix: str = "") -> dict[str, StaticAsset]:
+    found: dict[str, StaticAsset] = {}
+    for child in sorted(node.iterdir(), key=lambda c: c.name):
+        path = f"{prefix}{child.name}"
+        if child.is_dir():
+            found.update(_walk(child, path + "/"))
+            continue
+        suffix = "." + child.name.rsplit(".", 1)[-1] if "." in child.name else ""
+        if suffix in _CONTENT_TYPES:
+            found[path] = StaticAsset(child.read_bytes(), _CONTENT_TYPES[suffix])
+    return found
+
+
+STATIC: dict[str, StaticAsset] = _walk(importlib.resources.files("postroom.web") / "static")
+ASSET_VERSION = hashlib.sha256(
+    b"".join(name.encode() + b"\0" + a.body for name, a in STATIC.items())
+).hexdigest()[:12]
+templates.globals["asset_v"] = ASSET_VERSION
 
 EXPIRED_TXN = "Authorization request expired — start again from Claude."
 
@@ -112,13 +156,24 @@ def register_pages(mcp: FastMCP, services: Services) -> None:
     async def healthz(request: Request) -> Response:
         return JSONResponse({"status": "ok"})
 
-    @mcp.custom_route("/static/app.css", methods=["GET"], include_in_schema=False)
-    async def css(request: Request) -> Response:
+    @mcp.custom_route("/static/{path:path}", methods=["GET"], include_in_schema=False)
+    async def static(request: Request) -> Response:
+        path = request.path_params["path"]
+        asset = STATIC.get(path)
+        if asset is None:
+            return PlainTextResponse("Not found", status_code=404)
+        versioned = request.query_params.get("v") == ASSET_VERSION
+        long_lived = versioned or path.startswith("fonts/")
         return Response(
-            _CSS,
-            media_type="text/css; charset=utf-8",
-            headers={"Cache-Control": "public, max-age=3600"},
+            asset.body,
+            media_type=asset.media_type,
+            headers={"Cache-Control": LONG_CACHE if long_lived else SHORT_CACHE},
         )
+
+    @mcp.custom_route("/favicon.ico", methods=["GET"], include_in_schema=False)
+    async def favicon(request: Request) -> Response:
+        # Browsers probe /favicon.ico even with a <link rel=icon>; point them at the SVG.
+        return RedirectResponse(f"/static/favicon.svg?v={ASSET_VERSION}", status_code=301)
 
     # ----- login / logout -----------------------------------------------------------------
 

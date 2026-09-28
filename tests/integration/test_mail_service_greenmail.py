@@ -218,3 +218,25 @@ async def test_create_folder(svc, raw_imap, gm_account):
     assert sub == "Clients.Acme Příliš" and raw_imap.folder_exists("Clients.Acme Příliš")
     with pytest.raises(ValueError, match="already exists"):
         await svc.create_folder(gm_account, "clients")
+
+
+async def test_move_clears_a_deleted_mark_set_elsewhere(svc, raw_imap, gm_account):
+    from postroom.mail.models import MessageRef
+
+    if not raw_imap.folder_exists("Filed"):
+        raw_imap.create_folder("Filed")
+    seed(raw_imap, "org-marked-deleted")
+    uid = _uid(raw_imap, "INBOX", "org-marked-deleted")
+    raw_imap.select_folder("INBOX")
+    raw_imap.add_flags([uid], [b"\\Deleted", b"\\Seen"])
+
+    res = await svc.move([MessageRef(gm_account, "INBOX", uid)], "Filed")
+    assert res.updated == 1
+    moved = _uid(raw_imap, "Filed", "org-marked-deleted")
+    flags = set(_flags(raw_imap, "Filed", moved))
+    assert b"\\Deleted" not in flags and b"\\Seen" in flags
+
+
+async def test_create_folder_rejects_the_separator(svc, gm_account):
+    with pytest.raises(ValueError, match="use parent"):
+        await svc.create_folder(gm_account, "v1.2 notes")

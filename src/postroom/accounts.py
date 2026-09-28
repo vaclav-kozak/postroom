@@ -49,7 +49,7 @@ class MailAccessDenied(Exception):
     def __init__(self, email: str, level: MailAccess):
         super().__init__(
             f"account {email} is set to {_ACCESS_LABEL[level]} mail access; "
-            "the owner can change this in the admin UI"
+            "the owner can change this with the `postroom set-access` command"
         )
 
 
@@ -71,7 +71,9 @@ class Account:
     last_error: str | None
     last_ok_at: int | None
     last_check_at: int | None
-    mail_access: MailAccess = MailAccess.FULL
+    # Fail closed: an Account built without a level may only read. Stored accounts always
+    # carry theirs (the database default for them is "full").
+    mail_access: MailAccess = MailAccess.READ
 
     @property
     def is_gmail(self) -> bool:

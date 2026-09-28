@@ -34,6 +34,7 @@ class OrgFake:
         self.selected = None
         self.readonly = None
         self.next_uid = 1000
+        self.msgids = {}  # (folder, uid) -> Gmail X-GM-MSGID
 
     def list_folders(self):
         out = [(tuple(self.special.get(n, ())), self.delim, n) for n in self.boxes]
@@ -46,7 +47,19 @@ class OrgFake:
 
     def fetch(self, uids, fields):
         box = self.boxes[self.selected]
+        if fields == ["X-GM-MSGID"]:
+            assert "X-GM-EXT-1" in self.caps
+            return {u: {b"X-GM-MSGID": self.msgids[(self.selected, u)]} for u in uids if u in box}
         return {u: {b"FLAGS": tuple(box[u])} for u in uids if u in box}
+
+    def search(self, criteria, charset=None):
+        assert criteria[0] == "X-GM-MSGID"
+        self.calls.append(("search", self.selected, criteria[1]))
+        return [
+            u
+            for u in self.boxes[self.selected]
+            if self.msgids.get((self.selected, u)) == criteria[1]
+        ]
 
     def _writable(self):
         assert self.readonly is False, "write on a folder opened read-only"
@@ -67,22 +80,25 @@ class OrgFake:
     def has_capability(self, cap):
         return cap.upper() in self.caps
 
-    def _add(self, folder, flags):
+    def _add(self, folder, flags, msgid=None):
+        # Like a real server, a copy or move keeps every flag, \Deleted included.
         self.next_uid += 1
-        self.boxes[folder][self.next_uid] = set(flags) - {DELETED}
+        self.boxes[folder][self.next_uid] = set(flags)
+        if msgid is not None:
+            self.msgids[(folder, self.next_uid)] = msgid
 
     def move(self, uids, folder):
         box = self._writable()
         assert "MOVE" in self.caps
         self.calls.append(("move", list(uids), folder))
         for u in uids:
-            self._add(folder, box.pop(u))
+            self._add(folder, box.pop(u), self.msgids.get((self.selected, u)))
 
     def copy(self, uids, folder):
         box = self.boxes[self.selected]
         self.calls.append(("copy", list(uids), folder))
         for u in uids:
-            self._add(folder, box[u])
+            self._add(folder, box[u], self.msgids.get((self.selected, u)))
 
     def uid_expunge(self, uids):
         box = self._writable()
@@ -195,9 +211,7 @@ async def test_read_only_account_is_refused_and_not_contacted(repo, accounts):
         refs(A, "inbox", 1, 3) + refs(A, "Work", 10) + refs(B, "inbox", 1), read=True
     )
     assert res.updated == 1
-    message = (
-        f"account {A} is set to read-only mail access; the owner can change this in the admin UI"
-    )
+    message = f"account {A} is set to read-only mail access; the owner can change this with the `postroom set-access` command"
     assert [(f.account, f.folder, f.uids, f.message) for f in res.failed] == [
         (A, "inbox", [1, 3], message),
         (A, "Work", [10], message),
@@ -554,3 +568,247 @@ async def test_create_folder_server_refusal_is_a_clean_error(repo, accounts):
     svc = MailService(repo, StubPool({A: Refuses(standard_boxes())}))
     with pytest.raises(Exception, match="the server refused to create the folder"):
         await svc.create_folder(A, "Bad")
+
+
+# -- fix round 1 -------------------------------------------------------------------------------
+
+
+async def test_nothing_is_written_after_the_caller_timed_out(repo, accounts):
+    """A folder whose change has begun is finished; no further folder is started."""
+    import asyncio
+
+    class SlowMove(OrgFake):
+        def move(self, uids, folder):
+            time.sleep(0.3)
+            super().move(uids, folder)
+
+    f = SlowMove(standard_boxes(), special=standard_special())
+    svc = MailService(repo, StubPool({A: f}), account_timeout=0.1)
+    res = await svc.move(refs(A, "inbox", 1) + refs(A, "Work", 10), "archive")
+    assert res.updated == 0 and {g.folder for g in res.failed} == {"inbox", "Work"}
+    assert all(g.message == PARTIAL_TIMEOUT for g in res.failed)
+    assert res.destinations == {}  # nothing reported as moved
+    await asyncio.sleep(0.6)  # let the abandoned thread run out
+    # The folder under way when the caller gave up is finished (under heavy load the
+    # timeout may even fire before it starts); the next folder is never started.
+    assert f.ops("move") in ([], [("move", [1], "Archive")])
+    assert set(f.boxes["Work"]) == {10, 11}
+
+
+async def test_a_batch_queued_past_the_timeout_does_nothing(repo, accounts):
+    """The thread waited for the account's connection (held by a long read) until after
+    the caller gave up: it must not start the change then."""
+    import asyncio
+
+    f = fake()
+
+    class BusyPool(StubPool):
+        @contextlib.contextmanager
+        def session(self, email, manual=False):
+            time.sleep(0.3)  # entry.lock held by another operation
+            with super().session(email, manual) as c:
+                yield c
+
+    svc = MailService(repo, BusyPool({A: f}), account_timeout=0.1)
+    res = await svc.set_flags(refs(A, "inbox", 1), read=True)
+    assert res.failed[0].message == PARTIAL_TIMEOUT
+    await asyncio.sleep(0.5)
+    assert f.calls == [] and f.boxes["INBOX"][1] == set()
+
+
+def gmail_archive_fake(caps=("MOVE", "UIDPLUS", "X-GM-EXT-1")):
+    """Gmail: message 101 is in the Inbox and labelled Clients, 102 only in All Mail."""
+    f = OrgFake(
+        {
+            "INBOX": {1: set()},
+            "Clients": {5: set()},
+            "[Gmail]/All Mail": {20: set(), 21: set()},
+            "[Gmail]/Trash": {},
+        },
+        caps=caps,
+        special={"[Gmail]/All Mail": (b"\\All",), "[Gmail]/Trash": (b"\\Trash",)},
+        noselect=["[Gmail]"],
+    )
+    f.msgids = {
+        ("INBOX", 1): 101,
+        ("Clients", 5): 101,
+        ("[Gmail]/All Mail", 20): 101,
+        ("[Gmail]/All Mail", 21): 102,
+    }
+    return f
+
+
+async def test_gmail_archive_of_all_mail_refs_removes_them_from_the_inbox(repo, accounts):
+    # A get_thread result: every message is referenced from All Mail.
+    f = gmail_archive_fake()
+    res = await MailService(repo, StubPool({G: f})).move(
+        refs(G, "[Gmail]/All Mail", 20, 21, 99), "archive"
+    )
+    assert res.updated == 1 and res.destinations == {G: "[Gmail]/All Mail"}
+    assert [(g.folder, g.uids, g.message) for g in res.skipped] == [
+        ("[Gmail]/All Mail", [21], "not in the Inbox")
+    ]
+    assert [(g.uids, g.message) for g in res.failed] == [([99], MESSAGE_NOT_FOUND)]
+    assert f.ops("move") == [("move", [1], "[Gmail]/All Mail")]
+    assert f.boxes["INBOX"] == {}
+    # The ref's own folder is only read.
+    assert ("select", "[Gmail]/All Mail", False) not in f.calls
+
+
+async def test_gmail_archive_of_a_label_ref_keeps_the_label(repo, accounts):
+    f = gmail_archive_fake()
+    res = await MailService(repo, StubPool({G: f})).move(refs(G, "Clients", 5), "archive")
+    assert res.updated == 1
+    assert f.ops("move") == [("move", [1], "[Gmail]/All Mail")]  # from INBOX, not Clients
+    assert 5 in f.boxes["Clients"] and f.boxes["INBOX"] == {}
+
+
+async def test_gmail_archive_of_inbox_refs_moves_them(repo, accounts):
+    f = gmail_archive_fake()
+    res = await MailService(repo, StubPool({G: f})).move(refs(G, "inbox", 1), "archive")
+    assert res.updated == 1 and f.ops("move") == [("move", [1], "[Gmail]/All Mail")]
+    assert f.ops("search") == []
+
+
+async def test_gmail_archive_without_message_ids_skips_non_inbox_refs(repo, accounts):
+    f = gmail_archive_fake(caps=("MOVE", "UIDPLUS"))
+    res = await MailService(repo, StubPool({G: f})).move(
+        refs(G, "[Gmail]/All Mail", 20) + refs(G, "INBOX", 1), "archive"
+    )
+    assert res.updated == 1
+    assert [(g.folder, g.uids, g.message) for g in res.skipped] == [
+        (
+            "[Gmail]/All Mail",
+            [20],
+            "on Gmail, archive works on Inbox emails; search folder=inbox and pass those uids",
+        )
+    ]
+
+
+async def test_read_only_folder_fails_only_that_folder(repo, accounts):
+    from imapclient.exceptions import IMAPClientReadOnlyError
+
+    from postroom.mail.service import FOLDER_READ_ONLY
+
+    class SharedReadOnly(OrgFake):
+        def select_folder(self, name, readonly=False):
+            super().select_folder(name, readonly)
+            if name == "INBOX" and not readonly:  # SELECT answered [READ-ONLY]
+                raise IMAPClientReadOnlyError("INBOX is not writable")
+
+    f = SharedReadOnly(standard_boxes(), special=standard_special())
+    res = await MailService(repo, StubPool({A: f})).set_flags(
+        refs(A, "inbox", 1) + refs(A, "Work", 10), read=True
+    )
+    assert res.updated == 1 and SEEN in f.boxes["Work"][10]
+    assert [(g.folder, g.message) for g in res.failed] == [("INBOX", FOLDER_READ_ONLY)]
+
+
+class _Connector:
+    """ImapConnector stand-in handing out the given fake clients."""
+
+    def __init__(self, clients):
+        self.clients = clients
+        self.connects = []
+
+    def connect(self, account, secret):
+        self.connects.append(account.email)
+        c = self.clients[account.email]
+        if isinstance(c, Exception):
+            raise c
+        return c
+
+
+class PooledFake(OrgFake):
+    def noop(self):
+        pass
+
+    def logout(self):
+        self.calls.append(("logout",))
+
+
+async def test_lost_connection_mid_change_through_the_real_pool(repo, accounts):
+    from imapclient.exceptions import IMAPClientAbortError
+
+    from postroom.mail.imap import ImapPool
+
+    class DropsOnMove(PooledFake):
+        def move(self, uids, folder):
+            raise IMAPClientAbortError("socket error: EOF")
+
+    fa = DropsOnMove(standard_boxes(), special=standard_special())
+    fb = PooledFake(standard_boxes(), special=standard_special())
+    connector = _Connector({A: fa, B: fb})
+    pool = ImapPool(repo, connector)
+    res = await MailService(repo, pool).move(
+        refs(A, "inbox", 1) + refs(A, "Work", 10) + refs(B, "inbox", 1), "archive"
+    )
+    assert res.updated == 1 and res.destinations == {B: "Archive"}
+    failed = {g.folder: g.message for g in res.failed if g.account == A}
+    assert set(failed) == {"inbox", "Work"}  # pending folders keep the given spelling
+    for message in failed.values():
+        assert "EOF" in message and "may have been partially applied" in message
+    assert ("logout",) in fa.calls  # the broken connection was dropped
+    assert pool._entries[A].client is None and pool._entries[B].client is fb
+
+
+async def test_failed_connect_is_not_reported_as_maybe_applied(repo, accounts):
+    from postroom.mail.imap import ImapPool
+
+    pool = ImapPool(repo, _Connector({A: OSError("connection refused")}))
+    res = await MailService(repo, pool).trash(refs(A, "inbox", 1))
+    assert "connection refused" in res.failed[0].message
+    assert "partially applied" not in res.failed[0].message
+
+
+async def test_a_message_marked_deleted_elsewhere_arrives_undeleted(repo, accounts):
+    for caps in (("MOVE",), ("UIDPLUS",)):
+        f = fake(caps=caps)
+        f.boxes["INBOX"][2] = {SEEN, DELETED}
+        res = await MailService(repo, StubPool({A: f})).move(refs(A, "inbox", 1, 2), "Work")
+        assert res.updated == 2
+        assert f.ops("remove_flags") == [("remove_flags", [2], (DELETED,))]
+        new = sorted(set(f.boxes["Work"]) - {10, 11})
+        assert [f.boxes["Work"][u] for u in new] == [set(), {SEEN}], caps
+        assert set(f.boxes["INBOX"]) == {3}
+
+
+async def test_create_folder_rejects_the_hierarchy_delimiter(repo, accounts):
+    for delim, name in ((b".", "v1.2 notes"), (b"/", "Clients/"), (b"/", "a/b")):
+        f = fake(delim=delim)
+        with pytest.raises(ValueError, match="use parent"):
+            await MailService(repo, StubPool({A: f})).create_folder(A, name)
+        with pytest.raises(ValueError, match="use parent"):
+            await MailService(repo, StubPool({A: f})).create_folder(A, name, parent="Work")
+        assert f.ops("create_folder") == []
+
+
+def test_an_account_built_without_a_level_may_only_read():
+    from postroom.accounts import Account
+
+    acc = Account(
+        id=0,
+        email=A,
+        display_name=None,
+        provider=Provider.IMAP,
+        imap_host="imap.example.com",
+        imap_port=993,
+        imap_security="ssl",
+        imap_username=None,
+        caldav_url=None,
+        carddav_url=None,
+        has_secret=True,
+        enabled=True,
+        status=AccountStatus.PENDING,
+        last_error=None,
+        last_ok_at=None,
+        last_check_at=None,
+    )
+    assert acc.mail_access == MailAccess.READ and acc.capabilities == ["mail"]
+    assert acc.can_send is False
+
+
+async def test_moved_to_only_where_something_moved(repo, accounts):
+    f = fake()
+    res = await MailService(repo, StubPool({A: f})).trash(refs(A, "trash", 50))
+    assert res.updated == 0 and "moved_to" not in res.to_dict()

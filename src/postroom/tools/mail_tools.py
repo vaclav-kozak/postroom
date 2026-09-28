@@ -17,6 +17,7 @@ import re
 from collections.abc import Iterator
 from contextlib import contextmanager
 from datetime import date
+from typing import Annotated
 
 from fastmcp import FastMCP
 from fastmcp.exceptions import ToolError
@@ -31,7 +32,7 @@ from postroom.mail.imap import ImapError
 from postroom.mail.models import AttachmentInfo, MessageRef, SearchCriteria
 from postroom.mail.parse import truncate
 from postroom.mail.pdf import PdfTooComplex, extract_text_isolated
-from postroom.mail.service import MAX_SEARCH_OFFSET, PARTIAL_TIMEOUT, MailService
+from postroom.mail.service import MAX_BATCH_REFS, MAX_SEARCH_OFFSET, PARTIAL_TIMEOUT, MailService
 
 READ_ONLY = {"readOnlyHint": True, "openWorldHint": True}
 WRITES_DRAFT = {"readOnlyHint": False, "destructiveHint": False}
@@ -92,6 +93,10 @@ class EmailRef(BaseModel):
     account: str = Field(description="The account's email address.")
     folder: str = Field(description="The folder the email is in, as returned by search_emails.")
     uid: int = Field(ge=1, description="The email's uid in that folder.")
+
+
+# The batch cap is part of the input schema (maxItems), so a client knows it up front.
+EmailRefs = Annotated[list[EmailRef], Field(min_length=1, max_length=MAX_BATCH_REFS)]
 
 
 def _refs(emails: list[EmailRef]) -> list[MessageRef]:
@@ -369,7 +374,7 @@ def register_mail_tools(mcp: FastMCP, repo: AccountRepo, mail: MailService) -> N
 
     @mcp.tool(annotations=MODIFIES)
     async def mark_emails(
-        emails: list[EmailRef], read: bool | None = None, flagged: bool | None = None
+        emails: EmailRefs, read: bool | None = None, flagged: bool | None = None
     ) -> dict:
         """Mark emails read or unread, and/or flag (star) or unflag them.
 
@@ -386,14 +391,16 @@ def register_mail_tools(mcp: FastMCP, repo: AccountRepo, mail: MailService) -> N
         return result.to_dict()
 
     @mcp.tool(annotations=MOVES)
-    async def move_emails(emails: list[EmailRef], to_folder: str) -> dict:
+    async def move_emails(emails: EmailRefs, to_folder: str) -> dict:
         """Move emails to another folder of the same account.
 
         emails: one or more {account, folder, uid}; search_emails results can be passed
         straight through, across accounts and folders (at most 500 per call).
         to_folder: a folder name, or an alias resolved per account: inbox, archive, junk,
-        trash, all. "archive" archives the email (on Gmail it moves it to All Mail, i.e.
-        removes it from the Inbox). Emails already in to_folder are reported as skipped.
+        trash, all. "archive" archives the emails. On Gmail that removes them from the Inbox
+        and keeps their other labels, also for emails passed from All Mail, a label folder
+        or get_thread; emails that are not in the Inbox are skipped. Emails already in
+        to_folder are reported as skipped.
 
         Returns {"updated": n, "skipped": [{account, folder, uids, reason}],
         "failed": [{account, folder, uids, error}], "moved_to": {account: folder}}.
@@ -405,7 +412,7 @@ def register_mail_tools(mcp: FastMCP, repo: AccountRepo, mail: MailService) -> N
         return result.to_dict()
 
     @mcp.tool(annotations=MOVES)
-    async def trash_emails(emails: list[EmailRef]) -> dict:
+    async def trash_emails(emails: EmailRefs) -> dict:
         """Move emails to their account's Trash folder. Nothing is deleted permanently;
         emails already in Trash are left there (reported as skipped).
 

@@ -508,6 +508,7 @@ async def test_organize_tool_schemas(organizer):
         schema = tools[name].input_schema
         emails = schema["properties"]["emails"]
         assert emails["type"] == "array" and "emails" in schema["required"]
+        assert emails["maxItems"] == 500 and emails["minItems"] == 1
         item = emails["items"]
         if "$ref" in item:  # FastMCP may keep the model in $defs
             item = schema["$defs"][item["$ref"].rsplit("/", 1)[-1]]
@@ -617,7 +618,7 @@ async def test_read_only_account_through_the_tools(repo):
     mcp = _real_server(repo, StubPool({"user@example.com": f}))
     denied = (
         "account user@example.com is set to read-only mail access; "
-        "the owner can change this in the admin UI"
+        "the owner can change this with the `postroom set-access` command"
     )
     async with Client(mcp) as c:
         res = await c.call_tool("mark_emails", {"emails": [SEARCH_RESULT], "read": True})
@@ -638,6 +639,7 @@ async def test_too_many_refs_through_the_tools(repo):
         res = await c.call_tool(
             "mark_emails", {"emails": emails, "read": True}, raise_on_error=False
         )
-        assert res.is_error and "at most 500 emails" in res.content[0].text
+        # The cap is in the input schema (maxItems), so the arguments are rejected up front.
+        assert res.is_error and "at most 500 items" in res.content[0].text
         res = await c.call_tool("mark_emails", {"emails": emails[:1]}, raise_on_error=False)
         assert res.is_error and "read, flagged or both" in res.content[0].text

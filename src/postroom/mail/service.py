@@ -19,7 +19,7 @@ from dataclasses import dataclass, field
 from datetime import UTC, datetime
 
 import imapclient
-from imapclient.exceptions import IMAPClientAbortError, IMAPClientError
+from imapclient.exceptions import IMAPClientAbortError, IMAPClientError, IMAPClientReadOnlyError
 
 from postroom.accounts import Account, AccountRepo, AccountStatus, MailAccess
 from postroom.mail.folders import FolderNotFound, resolve_folder, special_use_of
@@ -91,10 +91,17 @@ MAX_BATCH_REFS = 500
 MAX_FOLDER_NAME = 200
 MESSAGE_NOT_FOUND = "message not found"
 MOVE_UNSUPPORTED = "this server cannot move messages safely (it supports neither MOVE nor UIDPLUS)"
-# An account that timed out may have had some of its emails changed already.
-PARTIAL_TIMEOUT = (
-    "the mail server did not respond in time; the change may have been partially applied; "
-    "re-check with search_emails before retrying"
+# An account that timed out or lost its connection mid-change may have had some of its
+# emails changed already.
+MAYBE_APPLIED = (
+    "the change may have been partially applied; re-check with search_emails before retrying"
+)
+PARTIAL_TIMEOUT = f"the mail server did not respond in time; {MAYBE_APPLIED}"
+FOLDER_READ_ONLY = "this folder is read-only on the server"
+# Gmail archive (= remove from the Inbox) of emails referenced from another folder.
+NOT_IN_INBOX = "not in the Inbox"
+GMAIL_ARCHIVE_NEEDS_INBOX = (
+    "on Gmail, archive works on Inbox emails; search folder=inbox and pass those uids"
 )
 
 _BLOCKED_STATUSES = (AccountStatus.NEEDS_RECONNECT, AccountStatus.NEEDS_GOOGLE_CONNECT)
@@ -277,7 +284,8 @@ class _AccountBatch:
 
     The IMAP thread records each folder's outcome as soon as it is done. When the account
     then fails (connection lost, timeout) the folders still pending fail with that error;
-    after `close()` late outcomes from a thread the caller gave up on are ignored.
+    after `close()` late outcomes from a thread the caller gave up on are ignored, and
+    the thread checks `closed` so that it starts no further writes.
     """
 
     def __init__(self, email: str, groups: dict[str, list[int]]):
@@ -286,6 +294,15 @@ class _AccountBatch:
         self._result = BatchResult()
         self._lock = threading.Lock()
         self._closed = False
+        # Set once a folder's change has begun: from then on a lost connection may have
+        # left part of the change applied.
+        self.started = False
+
+    @property
+    def closed(self) -> bool:
+        """True once the caller has given up on this account (timeout): do nothing more."""
+        with self._lock:
+            return self._closed
 
     def pending(self) -> dict[str, list[int]]:
         with self._lock:
@@ -328,6 +345,7 @@ class _FolderOutcome:
     updated: int = 0
     skipped: list[int] = field(default_factory=list)
     missing: list[int] = field(default_factory=list)
+    skip_reason: str | None = None  # overrides the operation's default reason
 
 
 # (client, resolved folder name, UIDs in it) -> what happened to them
@@ -343,6 +361,10 @@ def _folder_errors(batch: _AccountBatch, keys: list[str], name: str, uids: list[
     """
     try:
         yield
+    except IMAPClientReadOnlyError:
+        # SELECT answered [READ-ONLY]: the connection is fine (the folder is selected),
+        # only this folder cannot be changed. imaplib makes this a subclass of abort.
+        batch.record(keys, failed=[RefGroup(batch.email, name, uids, FOLDER_READ_ONLY)])
     except IMAPClientAbortError:
         raise
     except (IMAPClientError, ImapError, FolderNotFound, ValueError) as e:
@@ -353,7 +375,12 @@ def _each_folder(
     c, folders, batch: _AccountBatch, handle: FolderHandler, skip_reason: str = ""
 ) -> None:
     """Resolve the batch's folders (merging names that resolve to the same folder) and
-    hand each folder's UIDs to `handle`, recording the outcome folder by folder."""
+    hand each folder's UIDs to `handle`, recording the outcome folder by folder.
+
+    Stops as soon as the batch is closed (the caller timed out): a folder whose change has
+    begun is finished, but no further folder is started."""
+    if batch.closed:
+        return
     merged: dict[str, tuple[list[str], dict[int, None]]] = {}
     for key, uids in batch.pending().items():
         try:
@@ -366,35 +393,50 @@ def _each_folder(
         merged_uids.update(dict.fromkeys(uids))
 
     for name, (keys, uid_set) in merged.items():
+        if batch.closed:
+            return
         uids = list(uid_set)
         with _folder_errors(batch, keys, name, uids):
+            batch.started = True
             out = handle(c, name, uids)
-            skipped = [RefGroup(batch.email, name, out.skipped, skip_reason)] if out.skipped else []
+            reason = out.skip_reason or skip_reason
+            skipped = [RefGroup(batch.email, name, out.skipped, reason)] if out.skipped else []
             failed = (
                 [RefGroup(batch.email, name, out.missing, MESSAGE_NOT_FOUND)] if out.missing else []
             )
             batch.record(keys, updated=out.updated, skipped=skipped, failed=failed)
 
 
-def _existing(c, uids: list[int]) -> tuple[list[int], list[int]]:
-    """The UIDs that exist in the selected folder, and those that do not."""
+def _existing(c, uids: list[int]) -> tuple[list[int], list[int], dict[int, tuple]]:
+    """The UIDs that exist in the selected folder, those that do not, and their flags."""
     fetched = c.fetch(uids, ["FLAGS"])
     present = [u for u in uids if u in fetched]
     missing = [u for u in uids if u not in fetched]
-    return present, missing
+    flags = {u: tuple(fetched[u].get(b"FLAGS") or ()) for u in present}
+    return present, missing, flags
 
 
-def _move_uids(c, uids: list[int], dest: str) -> None:
+def _move_uids(c, uids: list[int], dest: str, flags: dict[int, tuple]) -> None:
     """Move UIDs of the selected folder to `dest`.
 
     UID MOVE (RFC 6851) when the server has it. Otherwise, with UIDPLUS (RFC 4315): COPY,
     mark the originals \\Deleted, then UID EXPUNGE exactly those UIDs. A plain EXPUNGE
     would also purge every other message someone had marked \\Deleted, so without
     either extension the move is refused.
+
+    A message another mail app marked \\Deleted (without expunging it) has that mark
+    removed first: it would travel with the move, and the next expunge of the destination
+    would purge the message the owner just filed.
     """
-    if c.has_capability("MOVE"):
+    has_move = c.has_capability("MOVE")
+    if not has_move and not c.has_capability("UIDPLUS"):
+        raise ImapError(MOVE_UNSUPPORTED)
+    marked = [u for u in uids if imapclient.DELETED in flags.get(u, ())]
+    if marked:
+        c.remove_flags(marked, [imapclient.DELETED], silent=True)
+    if has_move:
         c.move(uids, dest)
-    elif c.has_capability("UIDPLUS"):
+    else:
         c.copy(uids, dest)
         try:
             c.add_flags(uids, [imapclient.DELETED], silent=True)
@@ -405,15 +447,14 @@ def _move_uids(c, uids: list[int], dest: str) -> None:
             raise ImapError(
                 f"copied to {dest!r}, but the originals could not be removed: {e}"
             ) from e
-    else:
-        raise ImapError(MOVE_UNSUPPORTED)
 
 
-def _destination(account: Account, folders, wanted: str) -> str:
-    """The folder `wanted` names on this account, SPECIAL-USE first.
+def _destination(account: Account, folders, wanted: str) -> tuple[str, bool]:
+    """The folder `wanted` names on this account (SPECIAL-USE first), and whether this is
+    a Gmail archive.
 
-    Gmail has no \\Archive folder: archiving there means leaving the Inbox, which a move
-    to All Mail (\\All) does, so the "archive" alias maps to it.
+    Gmail has no \\Archive folder: archiving there means removing the Inbox label, which a
+    move from INBOX to All Mail (\\All) does, so the "archive" alias maps to All Mail.
     """
     if account.is_gmail and wanted.strip().lower() == "archive":
         has_archive = any(
@@ -421,8 +462,46 @@ def _destination(account: Account, folders, wanted: str) -> str:
             for flags, _delim, _name in folders
         )
         if not has_archive:
-            wanted = "all"
-    return resolve_folder(folders, wanted, special_use_first=True)
+            return resolve_folder(folders, "all", special_use_first=True), True
+    return resolve_folder(folders, wanted, special_use_first=True), False
+
+
+def _gmail_archive_from(c, name: str, uids: list[int], inbox: str, dest: str) -> _FolderOutcome:
+    """Archive on Gmail emails referenced from a folder other than the Inbox (All Mail, a
+    label, a get_thread result): remove them from the Inbox, keeping every other label.
+
+    A MOVE out of a label folder would remove that label and leave the Inbox label, so the
+    emails are looked up in the Inbox by their Gmail message id (X-GM-MSGID) and moved from
+    there to All Mail. Emails not in the Inbox are skipped.
+    """
+    c.select_folder(name, readonly=True)
+    if not c.has_capability("X-GM-EXT-1"):
+        present, missing, _ = _existing(c, uids)
+        return _FolderOutcome(
+            skipped=present, missing=missing, skip_reason=GMAIL_ARCHIVE_NEEDS_INBOX
+        )
+    fetched = c.fetch(uids, ["X-GM-MSGID"])
+    msgids = {u: fetched[u].get(b"X-GM-MSGID") for u in uids if u in fetched}
+    missing = [u for u in uids if u not in fetched]
+    if not msgids or any(m is None for m in msgids.values()):
+        return _FolderOutcome(
+            skipped=list(msgids), missing=missing, skip_reason=GMAIL_ARCHIVE_NEEDS_INBOX
+        )
+
+    c.select_folder(inbox, readonly=False)
+    in_inbox: dict[int, None] = {}
+    archived, not_in_inbox = [], []
+    for uid, msgid in msgids.items():
+        found = c.search(["X-GM-MSGID", msgid])
+        (archived if found else not_in_inbox).append(uid)
+        in_inbox.update(dict.fromkeys(found))
+    if in_inbox:
+        targets, _missing, flags = _existing(c, list(in_inbox))
+        if targets:
+            _move_uids(c, targets, dest, flags)
+    return _FolderOutcome(
+        updated=len(archived), skipped=not_in_inbox, missing=missing, skip_reason=NOT_IN_INBOX
+    )
 
 
 def _parent_folder(folders, parent: str) -> tuple[str, str | None]:
@@ -439,6 +518,15 @@ def _parent_folder(folders, parent: str) -> tuple[str, str | None]:
         name = matches[0]
     delim = next(d for _f, d, n in folders if n == name)
     return name, delim.decode() if isinstance(delim, bytes) else delim
+
+
+def _server_delimiter(folders) -> str | None:
+    """The hierarchy delimiter the server reports (INBOX's first), if it has one."""
+    ordered = sorted(folders, key=lambda f: f[2].upper() != "INBOX")
+    for _flags, delim, _name in ordered:
+        if delim:
+            return delim.decode() if isinstance(delim, bytes) else delim
+    return None
 
 
 class MailService:
@@ -882,6 +970,11 @@ class MailService:
                 error = PARTIAL_TIMEOUT
             except Exception as e:  # noqa: BLE001 -- reported per account, like search
                 error = str(e) or type(e).__name__
+                # The pool wraps a lost connection (socket timeout, EOF, abort) in ImapError:
+                # if it broke off a change, the server may have applied it anyway.
+                lost = isinstance(e.__cause__, (OSError, IMAPClientAbortError))
+                if batch.started and isinstance(e, ImapError) and lost:
+                    error = f"{error}; {MAYBE_APPLIED}"
             return batch.close(error)
 
         results = await asyncio.gather(*(run_one(e, g) for e, g in grouped.items()))
@@ -890,7 +983,8 @@ class MailService:
             total.updated += res.updated
             total.skipped.extend(res.skipped)
             total.failed.extend(res.failed)
-            total.destinations.update(res.destinations)
+            if res.updated:  # report a destination only where something was moved there
+                total.destinations.update(res.destinations)
         return total
 
     async def set_flags(
@@ -907,7 +1001,7 @@ class MailService:
 
         def handle(c, name: str, uids: list[int]) -> _FolderOutcome:
             c.select_folder(name, readonly=False)
-            present, missing = _existing(c, uids)
+            present, missing, _flags = _existing(c, uids)
             if present:
                 for flag, on in changes:
                     store = c.add_flags if on else c.remove_flags
@@ -916,6 +1010,8 @@ class MailService:
 
         def work(account: Account, batch: _AccountBatch) -> None:
             with self.pool.session(account.email) as c:
+                if batch.closed:  # waited for the connection past the caller's timeout
+                    return
                 _each_folder(c, c.list_folders(), batch, handle)
 
         return await self._batch(refs, MailAccess.ORGANIZE, work)
@@ -924,25 +1020,32 @@ class MailService:
         self, refs: list[MessageRef], to_folder: str, *, skip_reason: str | None = None
     ) -> BatchResult:
         """Move emails to `to_folder` (a folder name or alias, resolved per account).
-        Emails already in it are left there and reported as skipped."""
+        Emails already in it are left there and reported as skipped.
+
+        On Gmail, "archive" removes emails from the Inbox (see `_gmail_archive_from`)."""
         if not to_folder or not to_folder.strip():
             raise ValueError("to_folder must not be empty")
 
         def work(account: Account, batch: _AccountBatch) -> None:
             with self.pool.session(account.email) as c:
+                if batch.closed:  # waited for the connection past the caller's timeout
+                    return
                 folders = c.list_folders()
-                dest = _destination(account, folders, to_folder)
+                dest, gmail_archive = _destination(account, folders, to_folder)
+                inbox = resolve_folder(folders, "inbox") if gmail_archive else None
                 batch.set_destination(dest)
 
                 def handle(c, name: str, uids: list[int]) -> _FolderOutcome:
+                    if gmail_archive and name != inbox:
+                        return _gmail_archive_from(c, name, uids, inbox, dest)
                     if name == dest:
                         c.select_folder(name, readonly=True)
-                        present, missing = _existing(c, uids)
+                        present, missing, _flags = _existing(c, uids)
                         return _FolderOutcome(skipped=present, missing=missing)
                     c.select_folder(name, readonly=False)
-                    present, missing = _existing(c, uids)
+                    present, missing, flags = _existing(c, uids)
                     if present:
-                        _move_uids(c, present, dest)
+                        _move_uids(c, present, dest, flags)
                     return _FolderOutcome(updated=len(present), missing=missing)
 
                 _each_folder(c, folders, batch, handle, skip_reason or f"already in {dest}")
@@ -976,9 +1079,14 @@ class MailService:
                             "this server has no folder hierarchy; create the folder without "
                             "a parent"
                         )
-                    full = f"{parent_name}{delim}{name}"
                 else:
-                    full = name
+                    delim = _server_delimiter(folders)
+                if delim and delim in name:
+                    raise ValueError(
+                        f"folder name must not contain {delim!r} (the server's folder "
+                        "separator); use parent to create a folder inside another"
+                    )
+                full = f"{parent_name}{delim}{name}" if parent else name
                 if any(n.lower() == full.lower() for _f, _d, n in folders):
                     raise ValueError(f"folder already exists: {full!r}")
                 try:

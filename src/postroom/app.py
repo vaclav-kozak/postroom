@@ -28,6 +28,8 @@ from postroom.tools.mail_tools import register_mail_tools
 from postroom.tools.pim_tools import register_pim_tools
 from postroom.web.admin import register_admin
 from postroom.web.pages import register_pages
+from postroom.web.proxy import ClientAddressMiddleware
+from postroom.web.ratelimit import AuthRateLimitMiddleware
 from postroom.web.security import SecurityHeadersMiddleware
 
 SERVER_INSTRUCTIONS = (
@@ -179,16 +181,23 @@ def create_app(settings: Settings | None = None, services: Services | None = Non
     mcp = build_mcp(services, auth=services.provider)
     register_pages(mcp, services)
     register_admin(mcp, services)
+    settings = services.settings
+    ours = [
+        Middleware(SecurityHeadersMiddleware),
+        Middleware(ClientAddressMiddleware, trusted_proxies=settings.trusted_proxy_networks),
+        Middleware(AuthRateLimitMiddleware, per_minute=settings.auth_rate_limit_per_minute),
+    ]
     app = mcp.http_app(
         path="/mcp",
         stateless_http=True,
         json_response=True,
-        middleware=[Middleware(SecurityHeadersMiddleware)],
+        middleware=list(ours),
     )
-    # Move the headers middleware to the outside of the stack, so responses produced by the
-    # other middleware (e.g. the SDK's authentication middleware) carry the headers too.
-    security = app.user_middleware.pop()
-    app.user_middleware.insert(0, security)
+    # Move our middleware to the outside of the stack, in this order: the security headers
+    # reach every response (also those of the SDK's authentication middleware and the 429s),
+    # and the client address is resolved before the rate limit and anything else reads it.
+    del app.user_middleware[-len(ours) :]
+    app.user_middleware[0:0] = ours
     # Starlette's automatic trailing-slash redirect builds its Location from the Host header;
     # disable it and redirect the one path clients use (/mcp/) to the configured public URL.
     app.router.redirect_slashes = False

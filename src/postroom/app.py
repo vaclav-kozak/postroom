@@ -210,6 +210,11 @@ def create_app(settings: Settings | None = None, services: Services | None = Non
     register_pages(mcp, services)
     register_admin(mcp, services)
     settings = services.settings
+    if not settings.admin_password_hash_b64:
+        log.warning(
+            "POSTROOM_ADMIN_PASSWORD_HASH_B64 is not set: nobody can log in to the admin UI "
+            "(create it with `postroom set-password`)"
+        )
     ours = [
         Middleware(SecurityHeadersMiddleware),
         Middleware(ClientAddressMiddleware, trusted_proxies=settings.trusted_proxy_networks),

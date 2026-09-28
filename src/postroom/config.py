@@ -1,7 +1,11 @@
+import base64
+import binascii
 from ipaddress import IPv4Network, IPv6Network, ip_network
 from urllib.parse import urlparse
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
+from argon2 import extract_parameters
+from argon2.exceptions import InvalidHashError
 from pydantic import field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
@@ -31,6 +35,56 @@ class Settings(BaseSettings):
     # IANA time zone (e.g. Europe/Berlin, America/New_York) for date-times given without a
     # UTC offset, for new calendar events and for the times the admin UI shows.
     timezone: str = "UTC"
+
+    # A bad value is a configuration error at startup, never a traceback or a server that
+    # runs with login silently broken. The messages never repeat a secret's value.
+
+    @field_validator("master_key")
+    @classmethod
+    def _valid_master_key(cls, value: str) -> str:
+        value = value.strip()
+        try:
+            key = base64.b64decode(value, validate=True)
+        except (binascii.Error, ValueError):
+            key = b""
+        if len(key) != 32:
+            raise ValueError(
+                "must be 32 random bytes in base64 (44 characters, as `postroom gen-secrets` "
+                "writes it)"
+            )
+        return value
+
+    @field_validator("admin_password_hash_b64")
+    @classmethod
+    def _valid_admin_hash(cls, value: str) -> str:
+        value = value.strip()
+        if not value:
+            return value  # nobody can log in; the server logs a warning
+        try:
+            decoded = base64.b64decode(value, validate=True).decode("ascii")
+            if not decoded.startswith("$argon2"):
+                raise ValueError
+            extract_parameters(decoded)
+        except (binascii.Error, ValueError, InvalidHashError):
+            raise ValueError(
+                "is not a base64-encoded argon2 hash; create it with `postroom set-password` "
+                "(or `postroom gen-secrets`) and paste the value without quotes"
+            ) from None
+        return value
+
+    @field_validator("trusted_proxies")
+    @classmethod
+    def _valid_trusted_proxies(cls, value: str) -> str:
+        for item in (p.strip() for p in value.split(",")):
+            if not item:
+                continue
+            try:
+                ip_network(item, strict=False)
+            except ValueError:
+                raise ValueError(
+                    f"must be comma-separated IP addresses or networks (CIDR), got {item[:64]!r}"
+                ) from None
+        return value
 
     @field_validator("timezone")
     @classmethod

@@ -3,6 +3,8 @@ import io
 import os
 import stat
 
+import pytest
+
 from postroom import cli
 from postroom.crypto import verify_password
 from tests.unit.test_emclient import PASS, XML
@@ -221,3 +223,26 @@ def test_config_error_never_prints_values(monkeypatch, capsys):
     assert "POSTROOM_MASTER_KEY: Field required" in err
     assert "POSTROOM_CHECK_INTERVAL_SECONDS" in err
     assert "s3cr3t" not in err
+
+
+@pytest.mark.parametrize(
+    ("name", "value", "text"),
+    [
+        ("MASTER_KEY", "abc-s3cr3t", "must be 32 random bytes in base64"),
+        ("ADMIN_PASSWORD_HASH_B64", "'s3cr3t'", "is not a base64-encoded argon2 hash"),
+        ("TRUSTED_PROXIES", "nonsense", "must be comma-separated IP addresses or networks"),
+    ],
+)
+def test_serve_with_a_malformed_setting_is_one_config_line(
+    monkeypatch, settings, capsys, name, value, text
+):
+    import uvicorn
+
+    _env(monkeypatch, settings)
+    monkeypatch.setenv(f"POSTROOM_{name}", value)
+    monkeypatch.setattr(uvicorn, "run", lambda *a, **kw: pytest.fail("the server started"))
+    assert cli.main(["serve"]) == 2
+    err = capsys.readouterr().err
+    assert err.startswith(f"postroom: configuration error: POSTROOM_{name}: {text}")
+    assert len(err.strip().splitlines()) == 1
+    assert "Traceback" not in err and "s3cr3t" not in err

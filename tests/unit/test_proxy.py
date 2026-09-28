@@ -1,4 +1,5 @@
 import argparse
+import base64
 from ipaddress import ip_network
 
 import httpx
@@ -143,5 +144,5 @@ def test_serve_disables_uvicorn_proxy_headers(monkeypatch):
 
 
 def test_settings_default():
-    s = Settings(master_key="x", session_secret="y")
+    s = Settings(master_key=base64.b64encode(bytes(32)).decode(), session_secret="y")
     assert s.auth_rate_limit_per_minute == 10

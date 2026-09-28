@@ -1,12 +1,16 @@
 from datetime import date, datetime, timedelta
 from urllib.parse import parse_qs, urlparse
+from zoneinfo import ZoneInfo
 
 import httpx
 import pytest
 import respx
 
 from postroom.google.api import CAL, PEOPLE, TASKS, GoogleApi
-from postroom.pim.models import TZ, EventInput, PimError, TaskInput
+from postroom.pim.models import EventInput, PimError, TaskInput
+
+# Any zone with a UTC offset and DST works; the server default is UTC.
+TZ = ZoneInfo("Europe/Berlin")
 
 
 class FakeOAuth:
@@ -24,7 +28,7 @@ class FakeOAuth:
 
 @pytest.fixture
 def api():
-    return GoogleApi("me@gmail.com", FakeOAuth(), http=httpx.Client())
+    return GoogleApi("me@gmail.com", FakeOAuth(), http=httpx.Client(), tz=TZ)
 
 
 @respx.mock
@@ -61,7 +65,7 @@ def test_create_event_never_sends_invites(api):
     req = route.calls[0].request
     assert parse_qs(urlparse(str(req.url)).query)["sendUpdates"] == ["none"]
     body = req.read().decode()
-    assert "attendees" not in body and '"timeZone":"Europe/Prague"' in body.replace(" ", "")
+    assert "attendees" not in body and '"timeZone":"Europe/Berlin"' in body.replace(" ", "")
     assert ev.id == "e1" and not ev.all_day
 
 

@@ -1,11 +1,15 @@
 from datetime import date, datetime
+from zoneinfo import ZoneInfo
 
 import pytest
 from fastmcp import Client, FastMCP
 
 from postroom.mail.models import AccountError
-from postroom.pim.models import TZ, CalendarInfo, EventInfo, PimError, TaskInfo
+from postroom.pim.models import CalendarInfo, EventInfo, PimError, TaskInfo
 from postroom.tools.pim_tools import register_pim_tools
+
+# Any zone with a UTC offset and DST works; the server default is UTC.
+TZ = ZoneInfo("Europe/Berlin")
 
 
 class FakePim:
@@ -36,7 +40,7 @@ class FakePim:
 @pytest.fixture
 def server():
     mcp, pim = FastMCP("t"), FakePim()
-    register_pim_tools(mcp, pim)
+    register_pim_tools(mcp, pim, TZ)
     return mcp, pim
 
 
@@ -126,7 +130,7 @@ class MorePim(FakePim):
 @pytest.fixture
 def more():
     mcp, pim = FastMCP("t"), MorePim()
-    register_pim_tools(mcp, pim)
+    register_pim_tools(mcp, pim, TZ)
     return mcp, pim
 
 
@@ -149,8 +153,10 @@ async def test_annotations_and_safety_descriptions(more):
         assert tools[name].annotations.read_only_hint is False
         assert tools[name].annotations.destructive_hint is True
     assert "invit" in tools["create_event"].description
-    assert "Europe/Prague" in tools["create_event"].description
-    assert "Europe/Prague" in tools["list_events"].description
+    for name in ("create_event", "list_events", "update_event"):
+        # The zone is a server setting: the docstrings name the setting, never a fixed zone.
+        assert "POSTROOM_TIMEZONE" in tools[name].description
+        assert "Europe/" not in tools[name].description
     for name in ("update_event", "delete_event"):
         assert "attendees" in tools[name].description and "recurring" in tools[name].description
 
@@ -173,10 +179,11 @@ async def test_list_calendars_shape_and_account_normalised(more):
         "errors": [
             {"account": "g@gmail.com", "error": "account unavailable: needs_google_connect"}
         ],
+        "time_zone": "Europe/Berlin",
     }
 
 
-async def test_list_events_converts_dates_to_prague_midnight(server):
+async def test_list_events_converts_dates_to_local_midnight(server):
     mcp, pim = server
     async with Client(mcp) as c:
         await c.call_tool(
@@ -310,7 +317,7 @@ class ManyPim(FakePim):
 
 async def _call(pim, tool, args):
     mcp = FastMCP("t")
-    register_pim_tools(mcp, pim)
+    register_pim_tools(mcp, pim, TZ)
     async with Client(mcp) as c:
         return (await c.call_tool(tool, args)).structured_content
 

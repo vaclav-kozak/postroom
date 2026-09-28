@@ -269,7 +269,15 @@ def register_admin(mcp: FastMCP, services: Services) -> None:
         return deco
 
     def page(request: Request, name: str, status: int = 200, **ctx) -> Response:
-        return render(name, status=status, owner=True, csrf=owner.csrf_token(request), **ctx)
+        # tz: admin pages show times in the server's configured time zone.
+        return render(
+            name,
+            status=status,
+            owner=True,
+            csrf=owner.csrf_token(request),
+            tz=settings.tz,
+            **ctx,
+        )
 
     def back(msg: str) -> RedirectResponse:
         return RedirectResponse(f"/admin?msg={msg}", status_code=303)

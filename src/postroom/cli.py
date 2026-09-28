@@ -7,6 +7,8 @@ import os
 import sys
 from datetime import UTC, datetime
 
+from pydantic import ValidationError
+
 from postroom.accounts import AccountRepo, MailAccess
 from postroom.config import Settings
 from postroom.crypto import SecretBox, generate_key, hash_password, new_token, random_password
@@ -323,7 +325,25 @@ def main(argv: list[str] | None = None) -> int:
     p_rkey.set_defaults(func=_cmd_revoke_api_key)
 
     args = parser.parse_args(argv)
-    return args.func(args)
+    try:
+        return args.func(args)
+    except ValidationError as e:
+        if e.title != Settings.__name__:
+            raise
+        _print_config_errors(e)
+        return 2
+
+
+def _print_config_errors(error: ValidationError) -> None:
+    """One line per invalid setting, named by its environment variable.
+
+    Only pydantic's message is printed, never the offending value (it may be a secret).
+    """
+    for item in error.errors(include_input=False, include_url=False):
+        field = ".".join(str(p) for p in item.get("loc", ())) or "settings"
+        msg = item.get("msg", "invalid")
+        msg = msg.removeprefix("Value error, ")
+        print(f"postroom: configuration error: POSTROOM_{field.upper()}: {msg}", file=sys.stderr)
 
 
 if __name__ == "__main__":

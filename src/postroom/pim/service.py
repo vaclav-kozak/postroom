@@ -1,15 +1,17 @@
 """PimService: routes calendar/task/contact calls to each account's backend.
 
-Backends: Google accounts use `GoogleApi`; IMAP (mailcow/SOGo) accounts use
-`CalDavBackend` for calendars and tasks and `CardDavBackend` for contacts.
+Backends: Google accounts use `GoogleApi`; IMAP accounts with a CalDAV/CardDAV server
+(mailcow/SOGo, Nextcloud, Radicale, ...) use `CalDavBackend` for calendars and tasks and
+`CardDavBackend` for contacts.
 
 fail2ban safety: an account that is disabled or in `needs_reconnect` /
 `needs_google_connect` is never contacted. A CalDAV/CardDAV login failure trips the
 account's circuit breaker (`needs_reconnect`), which also stops mail access, because
-mailcow's fail2ban counts SOGo logins together with IMAP logins. CalDAV/CardDAV calls
-hold the account's login lock (shared with the IMAP pool, see `postroom.login_locks`)
-and re-read the status after acquiring it, so calls queued behind a failed login fail
-fast instead of logging in again: one wrong password costs one failed login.
+servers such as mailcow run one fail2ban that counts DAV (SOGo) and IMAP logins
+together. CalDAV/CardDAV calls hold the account's login lock (shared with the IMAP
+pool, see `postroom.login_locks`) and re-read the status after acquiring it, so calls
+queued behind a failed login fail fast instead of logging in again: one wrong password
+costs one failed login.
 
 Every backend call is synchronous and runs in `asyncio.to_thread` under a timeout;
 multi-account calls run concurrently under a semaphore and report per-account failures
@@ -23,6 +25,7 @@ from collections.abc import AsyncIterator, Callable, Iterator
 from contextlib import asynccontextmanager, contextmanager
 from datetime import datetime, time
 from urllib.parse import urlsplit
+from zoneinfo import ZoneInfo
 
 from postroom.accounts import Account, AccountRepo, AccountStatus, Provider
 from postroom.dav.caldav_backend import CalDavBackend
@@ -33,7 +36,6 @@ from postroom.google.oauth import GoogleOAuth
 from postroom.login_locks import LoginLocks
 from postroom.mail.models import AccountError
 from postroom.pim.models import (
-    TZ,
     CalendarInfo,
     ContactInfo,
     EventInfo,
@@ -73,15 +75,15 @@ def _unavailable(account: Account) -> str | None:
     return None
 
 
-def _start_key(value: str | None) -> datetime:
-    """Sort key for an ISO `start` string (all-day dates sort at local midnight)."""
+def _start_key(value: str | None, tz: ZoneInfo) -> datetime:
+    """Sort key for an ISO `start` string (all-day dates sort at local midnight in `tz`)."""
     try:
-        when = parse_when(value or "")
+        when = parse_when(value or "", tz)
     except ValueError:
-        return datetime.max.replace(tzinfo=TZ)
+        return datetime.max.replace(tzinfo=tz)
     if isinstance(when, datetime):
         return when
-    return datetime.combine(when, time.min, TZ)
+    return datetime.combine(when, time.min, tz)
 
 
 def _consume(task: asyncio.Task) -> None:
@@ -108,8 +110,11 @@ class PimService:
         max_concurrency: int = 4,
         timeout: float = 60,
         locks: LoginLocks | None = None,
+        tz: ZoneInfo | None = None,
     ):
         self.repo = repo
+        # The server's configured time zone (POSTROOM_TIMEZONE), handed to every backend.
+        self.tz = tz or ZoneInfo("UTC")
         self.google = google
         self.backend_factory = backend_factory or self._default_backend
         self.max_concurrency = max_concurrency
@@ -132,7 +137,7 @@ class PimService:
         if account.provider == Provider.GOOGLE:
             if self.google is None:
                 raise PimError("Google is not configured on this server")
-            return GoogleApi(email, self.google)
+            return GoogleApi(email, self.google, tz=self.tz)
         url = account.carddav_url if capability == "contacts" else account.caldav_url
         if not url:
             raise PimError(f"{email} has no {capability}")
@@ -141,7 +146,10 @@ class PimService:
         if not password:
             raise PimError(f"{email} has no stored password")
         cls = CardDavBackend if capability == "contacts" else CalDavBackend
-        return cls(email, url, account.login, password, on_auth_failure=self._trip_breaker(email))
+        on_auth_failure = self._trip_breaker(email)
+        if cls is CardDavBackend:
+            return cls(email, url, account.login, password, on_auth_failure=on_auth_failure)
+        return cls(email, url, account.login, password, on_auth_failure=on_auth_failure, tz=self.tz)
 
     def backend(self, account: Account, capability: str) -> object:
         return self.backend_factory(account, capability)
@@ -321,7 +329,7 @@ class PimService:
         events, errors = await self._many(
             "calendar", email, lambda b: b.list_events(calendar_id, start, end, query)
         )
-        events.sort(key=lambda e: _start_key(e.start))
+        events.sort(key=lambda e: _start_key(e.start, self.tz))
         return events, errors
 
     async def create_event(

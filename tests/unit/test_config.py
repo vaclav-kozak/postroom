@@ -1,3 +1,6 @@
+import pytest
+from pydantic import ValidationError
+
 from postroom.config import Settings
 
 
@@ -18,3 +21,25 @@ def test_env_prefix(monkeypatch):
     assert s.secure_cookies is True
     assert s.public_host == "imap-mcp.example.com"
     assert s.google_enabled is False
+
+
+def test_time_zone_defaults_to_utc(settings):
+    assert settings.timezone == "UTC" and settings.tz.key == "UTC"
+
+
+def test_time_zone_from_env(monkeypatch):
+    monkeypatch.setenv("POSTROOM_MASTER_KEY", "x")
+    monkeypatch.setenv("POSTROOM_SESSION_SECRET", "y")
+    monkeypatch.setenv("POSTROOM_TIMEZONE", " Asia/Tokyo ")
+    s = Settings()
+    assert s.timezone == "Asia/Tokyo" and s.tz.key == "Asia/Tokyo"
+
+
+@pytest.mark.parametrize("value", ["Mars/Olympus", "", "../etc/passwd", "/etc/localtime", "Europe"])
+def test_invalid_time_zone_is_a_clear_config_error(monkeypatch, value):
+    monkeypatch.setenv("POSTROOM_MASTER_KEY", "x")
+    monkeypatch.setenv("POSTROOM_SESSION_SECRET", "y")
+    monkeypatch.setenv("POSTROOM_TIMEZONE", value)
+    with pytest.raises(ValidationError) as e:
+        Settings()
+    assert "IANA time zone" in str(e.value)

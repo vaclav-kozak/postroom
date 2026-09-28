@@ -8,12 +8,15 @@ itself, stopping as soon as an instance can no longer make the first MAX_ITEMS.
 
 import time
 from datetime import datetime, timedelta
+from zoneinfo import ZoneInfo
 
 import icalendar
 
 from postroom.dav import caldav_backend
 from postroom.dav.caldav_backend import MAX_ITEMS, CalDavBackend
-from postroom.pim.models import TZ
+
+# Any zone with a UTC offset and DST works; the server default is UTC.
+TZ = ZoneInfo("Europe/Berlin")
 
 HEAD = "BEGIN:VCALENDAR\r\nVERSION:2.0\r\nPRODID:-//t//t//EN\r\n"
 TAIL = "END:VCALENDAR\r\n"
@@ -66,7 +69,9 @@ class FakeCal:
 
 
 def _backend(cal) -> CalDavBackend:
-    backend = CalDavBackend("me@example.com", "https://dav.example.com/SOGo/dav/me/", "me", "pw")
+    backend = CalDavBackend(
+        "me@example.com", "https://dav.example.com/SOGo/dav/me/", "me", "pw", tz=TZ
+    )
     backend._collections = lambda component: [cal]
     return backend
 

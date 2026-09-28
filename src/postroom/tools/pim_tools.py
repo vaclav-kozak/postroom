@@ -1,4 +1,4 @@
-"""MCP calendar, task and contact tools for Google and mailcow (SOGo) accounts.
+"""MCP calendar, task and contact tools for Google accounts and CalDAV/CardDAV accounts.
 
 Safety: no tool accepts attendees, so nothing here can send an invitation. Events and
 tasks that already have attendees or are recurring are read-only (the backends refuse
@@ -13,11 +13,12 @@ import re
 from collections.abc import Iterator
 from contextlib import contextmanager
 from datetime import date, datetime, time, timedelta
+from zoneinfo import ZoneInfo
 
 from fastmcp import FastMCP
 from fastmcp.exceptions import ToolError
 
-from postroom.pim.models import TZ, EventInput, PimError, TaskInput, parse_when, validate_range
+from postroom.pim.models import EventInput, PimError, TaskInput, parse_when, validate_range
 from postroom.pim.service import PimService
 
 READ_ONLY = {"readOnlyHint": True, "openWorldHint": True}
@@ -60,23 +61,23 @@ def _required(name: str, value: str) -> str:
     return value
 
 
-def _when(name: str, value: str | None) -> datetime | date | None:
+def _when(name: str, value: str | None, tz: ZoneInfo) -> datetime | date | None:
     if value is None:
         return None
     try:
-        return parse_when(value)
+        return parse_when(value, tz)
     except ValueError:
         raise ValueError(
             f"{name} must be YYYY-MM-DD or an ISO date-time, got {str(value)[:100]!r}"
         ) from None
 
 
-def _instant(name: str, value: str) -> datetime:
-    """A range bound as an aware datetime; a plain date means local midnight."""
-    when = _when(name, value)
+def _instant(name: str, value: str, tz: ZoneInfo) -> datetime:
+    """A range bound as an aware datetime; a plain date means local midnight in `tz`."""
+    when = _when(name, value, tz)
     if isinstance(when, datetime):
         return when
-    return datetime.combine(when, time.min, TZ)
+    return datetime.combine(when, time.min, tz)
 
 
 def _due(value: str | None) -> date | None:
@@ -115,19 +116,22 @@ def _capped(key: str, items: list, errors: list) -> dict:
     return result
 
 
-def register_pim_tools(mcp: FastMCP, pim: PimService) -> None:
+def register_pim_tools(mcp: FastMCP, pim: PimService, tz: ZoneInfo) -> None:
+    """Register the tools. `tz` is the server's configured time zone (POSTROOM_TIMEZONE);
+    the docstrings below must not name a zone, since it is a per-server setting."""
     # -- calendars & events -----------------------------------------------------
 
     @mcp.tool(annotations=READ_ONLY)
     async def list_calendars(account: str | None = None) -> dict:
         """List calendars of one account, or of every account with a calendar.
 
-        Returns {"calendars": [...], "errors": [...]}: accounts that fail are listed in
-        `errors`. Pass a calendar's `account` and `id` (as calendar_id) to the event tools.
+        Returns {"calendars": [...], "errors": [...], "time_zone": ...}: accounts that
+        fail are listed in `errors`; `time_zone` is the server's configured time zone.
+        Pass a calendar's `account` and `id` (as calendar_id) to the event tools.
         """
         with _tool_errors():
             calendars, errors = await pim.list_calendars(_norm(account))
-        return _lists("calendars", calendars, errors)
+        return {**_lists("calendars", calendars, errors), "time_zone": tz.key}
 
     @mcp.tool(annotations=READ_ONLY)
     async def list_events(
@@ -139,8 +143,9 @@ def register_pim_tools(mcp: FastMCP, pim: PimService) -> None:
     ) -> dict:
         """List events between start and end (at most 366 days), merged and sorted by start.
 
-        start / end: YYYY-MM-DD (local midnight) or an ISO date-time; naive times are
-        Europe/Prague. account: omit to read every account with a calendar.
+        start / end: YYYY-MM-DD (local midnight) or an ISO date-time; naive times are in
+        the server's configured time zone (POSTROOM_TIMEZONE), and event times come back
+        in it. account: omit to read every account with a calendar.
         calendar_id: one calendar from list_calendars (needs `account`); omit to read the
         account's calendars. query: free text matched against title/location/description.
         Events with `has_attendees` or `recurring` set are read-only for this server.
@@ -148,7 +153,7 @@ def register_pim_tools(mcp: FastMCP, pim: PimService) -> None:
         the earliest first; when `truncated` is true, narrow the range.
         """
         with _tool_errors():
-            begin, finish = _instant("start", start), _instant("end", end)
+            begin, finish = _instant("start", start, tz), _instant("end", end, tz)
             if finish <= begin:
                 raise ValueError("end must be after start")
             if finish - begin > MAX_RANGE:
@@ -175,19 +180,20 @@ def register_pim_tools(mcp: FastMCP, pim: PimService) -> None:
 
         start / end: both YYYY-MM-DD for an all-day event (end is exclusive: a one-day
         event on 5 Oct is start=2026-10-05, end=2026-10-06), or both ISO date-times;
-        naive times are Europe/Prague. calendar_id: one of the account's own calendars
+        naive times are in the server's configured time zone (POSTROOM_TIMEZONE), and a
+        timed event is stored in that zone. calendar_id: one of the account's own calendars
         (read_only=false in list_calendars); calendars shared by others are refused.
         The event has no attendees: this server never invites anyone or sends invitations.
         """
         with _tool_errors():
             data = EventInput(
                 title=_required("title", title),
-                start=_when("start", start),
-                end=_when("end", end),
+                start=_when("start", start, tz),
+                end=_when("end", end, tz),
                 location=location or None,
                 description=description or None,
             )
-            validate_range(data.start, data.end)
+            validate_range(data.start, data.end, tz)
             event = await pim.create_event(
                 _required("account", account).lower(), calendar_id or None, data
             )
@@ -206,7 +212,8 @@ def register_pim_tools(mcp: FastMCP, pim: PimService) -> None:
     ) -> dict:
         """Change an event's title, time, location or description; omitted fields stay.
 
-        start / end as in create_event (naive times are Europe/Prague). A new start
+        start / end as in create_event (naive times are in the server's configured time
+        zone, POSTROOM_TIMEZONE). A new start
         without a new end moves the event and keeps its duration. An empty location or
         description removes it. Events that have attendees or are recurring are
         read-only for this server and are refused; attendees can never be added.
@@ -216,8 +223,8 @@ def register_pim_tools(mcp: FastMCP, pim: PimService) -> None:
                 raise ValueError("title cannot be empty")
             data = EventInput(
                 title=title.strip() if title is not None else None,
-                start=_when("start", start),
-                end=_when("end", end),
+                start=_when("start", start, tz),
+                end=_when("end", end, tz),
                 location=location,
                 description=description,
             )

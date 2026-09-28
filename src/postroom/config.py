@@ -1,6 +1,8 @@
 from ipaddress import IPv4Network, IPv6Network, ip_network
 from urllib.parse import urlparse
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
+from pydantic import field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -26,6 +28,26 @@ class Settings(BaseSettings):
     trusted_proxies: str = "127.0.0.1,::1"
     # Emails one account may send per hour (send_email, forward_email, send_draft); 0 = no limit.
     send_limit_per_hour: int = 60
+    # IANA time zone (e.g. Europe/Berlin, America/New_York) for date-times given without a
+    # UTC offset, for new calendar events and for the times the admin UI shows.
+    timezone: str = "UTC"
+
+    @field_validator("timezone")
+    @classmethod
+    def _valid_timezone(cls, value: str) -> str:
+        value = value.strip()
+        try:
+            ZoneInfo(value)
+        except (ZoneInfoNotFoundError, ValueError, OSError):
+            raise ValueError(
+                f"must be an IANA time zone name such as UTC, "
+                f"Europe/Berlin or America/New_York, got {value[:64]!r}"
+            ) from None
+        return value
+
+    @property
+    def tz(self) -> ZoneInfo:
+        return ZoneInfo(self.timezone)
 
     @property
     def redirect_hosts(self) -> tuple[str, ...]:

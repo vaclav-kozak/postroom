@@ -1,5 +1,6 @@
 import re
 from datetime import UTC, date, datetime, timedelta, timezone
+from zoneinfo import ZoneInfo
 
 import caldav
 import httpx
@@ -8,15 +9,18 @@ from caldav.calendarobjectresource import CalendarObjectResource
 
 from postroom.dav.caldav_backend import CalDavBackend
 from postroom.dav.carddav import CardDavBackend
-from postroom.pim.models import TZ, EventInput, PimError, TaskInput
+from postroom.pim.models import EventInput, PimError, TaskInput
 from tests.integration.conftest import DAV_PASS, DAV_USER
+
+# Any zone with a UTC offset and DST works; the server default is UTC.
+TZ = ZoneInfo("Europe/Berlin")
 
 pytestmark = pytest.mark.integration
 
 
 @pytest.fixture
 def cal(radicale):
-    return CalDavBackend("alice@example.com", radicale, DAV_USER, DAV_PASS)
+    return CalDavBackend("alice@example.com", radicale, DAV_USER, DAV_PASS, tz=TZ)
 
 
 def test_calendars(cal):
@@ -151,7 +155,7 @@ def test_dot_ids_cannot_escape_the_collection(cal, radicale):
     )
 
 
-def test_offset_datetimes_are_stored_as_prague_with_vtimezone(cal):
+def test_offset_datetimes_are_stored_in_the_configured_zone_with_vtimezone(cal):
     plus2 = timezone(timedelta(hours=2))
     start = datetime(2026, 10, 7, 10, 0, tzinfo=plus2)
     ev = cal.create_event(
@@ -160,15 +164,31 @@ def test_offset_datetimes_are_stored_as_prague_with_vtimezone(cal):
     assert ev.start == "2026-10-07T10:00:00+02:00"
     raw = _stored(ev.calendar_id, ev.id)
     assert "UTC+02:00" not in raw
-    assert re.search(r'DTSTART;TZID="?Europe/Prague"?:20261007T100000', raw)
-    assert "BEGIN:VTIMEZONE" in raw and "TZID:Europe/Prague" in raw
+    assert re.search(r'DTSTART;TZID="?Europe/Berlin"?:20261007T100000', raw)
+    assert "BEGIN:VTIMEZONE" in raw and "TZID:Europe/Berlin" in raw
 
     cal.update_event(ev.calendar_id, ev.id, EventInput(start=datetime(2026, 10, 8, 8, tzinfo=UTC)))
     raw = _stored(ev.calendar_id, ev.id)
-    assert re.search(r'DTSTART;TZID="?Europe/Prague"?:20261008T100000', raw)
-    assert re.search(r'DTEND;TZID="?Europe/Prague"?:20261008T110000', raw)
+    assert re.search(r'DTSTART;TZID="?Europe/Berlin"?:20261008T100000', raw)
+    assert re.search(r'DTEND;TZID="?Europe/Berlin"?:20261008T110000', raw)
     assert "BEGIN:VTIMEZONE" in raw and "UTC" not in raw.split("BEGIN:VEVENT")[1]
     cal.delete_event(ev.calendar_id, ev.id)
+
+
+def test_default_zone_is_utc(radicale):
+    utc = CalDavBackend("alice@example.com", radicale, DAV_USER, DAV_PASS)
+    ev = utc.create_event(
+        None,
+        EventInput(
+            title="Naive",
+            start=datetime(2026, 10, 7, 10, 0, tzinfo=TZ),
+            end=datetime(2026, 10, 7, 11, 0, tzinfo=TZ),
+        ),
+    )
+    assert ev.start == "2026-10-07T08:00:00+00:00"
+    raw = _stored(ev.calendar_id, ev.id)
+    assert "DTSTART:20261007T080000Z" in raw and "Europe/" not in raw
+    utc.delete_event(ev.calendar_id, ev.id)
 
 
 def test_update_adds_vtimezone_to_an_event_that_had_none(cal):
@@ -182,8 +202,8 @@ def test_update_adds_vtimezone_to_an_event_that_had_none(cal):
     plus2 = timezone(timedelta(hours=2))
     cal.update_event(c.id, "utc-1", EventInput(start=datetime(2026, 10, 9, 14, tzinfo=plus2)))
     raw = _stored(c.id, "utc-1")
-    assert re.search(r'DTSTART;TZID="?Europe/Prague"?:20261009T140000', raw)
-    assert "BEGIN:VTIMEZONE" in raw and "TZID:Europe/Prague" in raw
+    assert re.search(r'DTSTART;TZID="?Europe/Berlin"?:20261009T140000', raw)
+    assert "BEGIN:VTIMEZONE" in raw and "TZID:Europe/Berlin" in raw
     cal.delete_event(c.id, "utc-1")
 
 

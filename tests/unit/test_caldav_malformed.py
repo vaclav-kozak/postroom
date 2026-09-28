@@ -6,11 +6,14 @@ tests feed the backend fake caldav objects directly.
 
 import logging
 from datetime import datetime, timedelta
+from zoneinfo import ZoneInfo
 
 import icalendar
 
 from postroom.dav.caldav_backend import CalDavBackend
-from postroom.pim.models import TZ
+
+# Any zone with a UTC offset and DST works; the server default is UTC.
+TZ = ZoneInfo("Europe/Berlin")
 
 HEAD = "BEGIN:VCALENDAR\r\nVERSION:2.0\r\nPRODID:-//t//t//EN\r\n"
 TAIL = "END:VCALENDAR\r\n"
@@ -68,7 +71,9 @@ class FakeCal:
 
 
 def _backend(objs) -> CalDavBackend:
-    backend = CalDavBackend("me@example.com", "https://dav.example.com/SOGo/dav/me/", "me", "pw")
+    backend = CalDavBackend(
+        "me@example.com", "https://dav.example.com/SOGo/dav/me/", "me", "pw", tz=TZ
+    )
     cal = FakeCal(objs)
     backend._collections = lambda component: [cal]
     return backend

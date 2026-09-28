@@ -12,7 +12,6 @@ from datetime import UTC, datetime, tzinfo
 from importlib.resources.abc import Traversable
 from typing import TYPE_CHECKING
 from urllib.parse import quote, urlparse
-from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 import jinja2
 from fastmcp import FastMCP
@@ -40,16 +39,13 @@ templates = jinja2.Environment(
 )
 
 
-try:
-    TZ: tzinfo = ZoneInfo("Europe/Prague")
-except ZoneInfoNotFoundError:  # no tz database available: show UTC rather than fail
-    TZ = UTC
-
-
-def _format_ts(value: int | None) -> str:
+@jinja2.pass_context
+def _format_ts(ctx: jinja2.runtime.Context, value: int | None) -> str:
+    """A Unix time as local time in the page's `tz` (the server's POSTROOM_TIMEZONE)."""
     if not value:
         return "—"
-    return datetime.fromtimestamp(value, TZ).strftime("%Y-%m-%d %H:%M")
+    tz: tzinfo = ctx.get("tz") or UTC
+    return datetime.fromtimestamp(value, tz).strftime("%Y-%m-%d %H:%M")
 
 
 templates.filters["ts"] = _format_ts

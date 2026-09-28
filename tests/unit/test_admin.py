@@ -206,3 +206,23 @@ async def test_google_connect_flow(env):
     assert a.provider == Provider.GOOGLE and services.repo.get_secret("me@gmail.com") == "rt-new"
     # Sending is opt-in: a newly connected Google account may not send yet.
     assert a.mail_access == "organize" and not a.can_send
+
+
+async def test_dashboard_shows_times_in_the_configured_zone(env):
+    c, services, _ = env
+    services.repo.upsert(email="tz@example.com", provider=Provider.IMAP, imap_host="imap.x")
+    services.repo.set_status("tz@example.com", AccountStatus.CONNECTED)
+    r = await c.get("/admin")
+    assert "Times are in UTC." in r.text
+
+
+def test_timestamp_filter_uses_the_page_zone():
+    from zoneinfo import ZoneInfo
+
+    from postroom.web.pages import templates
+
+    tmpl = templates.from_string("{{ t | ts }}")
+    t = 1_790_000_000  # 2026-09-21 14:13:20 UTC
+    assert tmpl.render(t=t) == "2026-09-21 14:13"
+    assert tmpl.render(t=t, tz=ZoneInfo("America/New_York")) == "2026-09-21 10:13"
+    assert tmpl.render(t=None) == "—"

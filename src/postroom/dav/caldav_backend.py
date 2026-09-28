@@ -1,4 +1,4 @@
-"""CalDAV calendars (VEVENT) and task lists (VTODO) for mailcow/SOGo accounts.
+"""CalDAV calendars (VEVENT) and task lists (VTODO) for IMAP accounts with a CalDAV server.
 
 Safety rules (see the PIM safety rules in the plan):
 - Nothing written here ever carries ATTENDEE or ORGANIZER, so the server never has a
@@ -22,8 +22,9 @@ import logging
 import uuid
 from collections.abc import Callable, Iterator
 from contextlib import contextmanager
-from datetime import UTC, date, datetime, time, timedelta
+from datetime import UTC, date, datetime, time, timedelta, tzinfo
 from urllib.parse import unquote
+from zoneinfo import ZoneInfo
 
 import caldav
 import icalendar
@@ -32,7 +33,6 @@ from caldav.lib import error as dav_error
 
 from postroom.dav.urls import require_dav_url
 from postroom.pim.models import (
-    TZ,
     CalendarInfo,
     EventInfo,
     EventInput,
@@ -95,19 +95,19 @@ def _occurrences(obj, start: datetime) -> tuple[bool, Iterator]:
     return recurring, recurring_ical_events.of(ical, components=["VEVENT"]).after(start)
 
 
-def _as_local(value: date | datetime) -> date | datetime:
-    """Date-times in Europe/Prague (floating ones are taken as Prague time)."""
+def _as_local(value: date | datetime, tz: tzinfo) -> date | datetime:
+    """Date-times in `tz` (floating ones are taken as local time in `tz`)."""
     if isinstance(value, datetime):
-        return aware(value).astimezone(TZ)
+        return aware(value, tz).astimezone(tz)
     return value
 
 
-def _sort_instant(value: date | datetime | None) -> datetime:
+def _sort_instant(value: date | datetime | None, tz: tzinfo) -> datetime:
     if value is None:
         return datetime.max.replace(tzinfo=UTC)
     if isinstance(value, datetime):
-        return aware(value)
-    return datetime.combine(value, time(), tzinfo=TZ)
+        return aware(value, tz)
+    return datetime.combine(value, time(), tzinfo=tz)
 
 
 def _prop_dt(comp, name: str) -> date | datetime | None:
@@ -146,13 +146,13 @@ def _new_uid() -> str:
     return f"{uuid.uuid4()}@{UID_DOMAIN}"
 
 
-def _to_ical_when(value: date | datetime) -> date | datetime:
-    """Date-times are stored in Europe/Prague (with its VTIMEZONE), never as a bare offset.
+def _to_ical_when(value: date | datetime, tz: tzinfo) -> date | datetime:
+    """Date-times are stored in `tz` (with its VTIMEZONE), never as a bare offset.
 
     icalendar would write an offset-only tzinfo as `TZID="UTC+02:00"` without any
     VTIMEZONE, which is invalid iCalendar.
     """
-    return aware(value).astimezone(TZ) if isinstance(value, datetime) else value
+    return aware(value, tz).astimezone(tz) if isinstance(value, datetime) else value
 
 
 def _main_component(ical):
@@ -191,8 +191,12 @@ class CalDavBackend:
         password: str,
         timeout: int = 30,
         on_auth_failure: Callable[[], None] = lambda: None,
+        tz: ZoneInfo | None = None,
     ):
         self.account = account
+        # The server's configured time zone: floating times are read in it, new and moved
+        # events are stored in it and listings are returned in it.
+        self.tz = tz or ZoneInfo("UTC")
         require_dav_url(url)  # the password goes out as Basic auth: never in cleartext
         self._client = _DAVClient(url=url, username=username, password=password, timeout=timeout)
         self._on_auth_failure = on_auth_failure
@@ -299,8 +303,8 @@ class CalDavBackend:
             calendar_id=self._id(cal),
             id=str(comp.get("UID", "")),
             title=_text(comp, "SUMMARY") or "",
-            start=iso(_as_local(start)) if start is not None else "",
-            end=iso(_as_local(end)) if end is not None else None,
+            start=iso(_as_local(start, self.tz)) if start is not None else "",
+            end=iso(_as_local(end, self.tz)) if end is not None else None,
             all_day=start is not None and is_all_day(start),
             location=_text(comp, "LOCATION"),
             description=_text(comp, "DESCRIPTION"),
@@ -334,7 +338,7 @@ class CalDavBackend:
         `end`, or can no longer be among the first `MAX_ITEMS` found so far. So memory
         and time are bounded by the number of objects, not by how often they recur.
         """
-        start, end = _sort_instant(start), _sort_instant(end)
+        start, end = _sort_instant(start, self.tz), _sort_instant(end, self.tz)
         needle = (query or "").strip().casefold()
         # The first MAX_ITEMS so far, as a heap whose top is the latest of them
         # (negated timestamps; `seq` keeps the earlier-found one first on a tie).
@@ -349,7 +353,7 @@ class CalDavBackend:
                     try:
                         recurring, instances = _occurrences(obj, start)
                         for comp in instances:
-                            key = _sort_instant(_prop_dt(comp, "DTSTART"))
+                            key = _sort_instant(_prop_dt(comp, "DTSTART"), self.tz)
                             if key >= end or (
                                 len(best) >= MAX_ITEMS and key.timestamp() >= -best[0][0]
                             ):
@@ -376,15 +380,15 @@ class CalDavBackend:
         if not data.title or data.start is None or data.end is None:
             raise PimError("title, start and end are required")
         try:
-            validate_range(data.start, data.end)
+            validate_range(data.start, data.end, self.tz)
         except ValueError as e:
             raise PimError(str(e)) from e
         ev = icalendar.Event()
         ev.add("UID", _new_uid())
         ev.add("DTSTAMP", datetime.now(UTC).replace(microsecond=0))
         ev.add("SUMMARY", data.title)
-        ev.add("DTSTART", _to_ical_when(data.start))
-        ev.add("DTEND", _to_ical_when(data.end))
+        ev.add("DTSTART", _to_ical_when(data.start, self.tz))
+        ev.add("DTEND", _to_ical_when(data.end, self.tz))
         if data.location:
             ev.add("LOCATION", data.location)
         if data.description:
@@ -422,20 +426,19 @@ class CalDavBackend:
             obj.save()
             return self._event_info(cal, obj)
 
-    @staticmethod
-    def _move(comp, new_start, new_end) -> None:
+    def _move(self, comp, new_start, new_end) -> None:
         old_start = _prop_dt(comp, "DTSTART")
         old_end = _prop_dt(comp, "DTEND")
         duration = _prop_dt(comp, "DURATION")
         if old_end is None and old_start is not None and isinstance(duration, timedelta):
             old_end = old_start + duration
         try:
-            start, end = rescheduled(old_start, old_end, new_start, new_end)
+            start, end = rescheduled(old_start, old_end, new_start, new_end, self.tz)
         except ValueError as e:
             raise PimError(str(e)) from e
         comp.pop("DURATION", None)
-        _set(comp, "DTSTART", _to_ical_when(start))
-        _set(comp, "DTEND", _to_ical_when(end))
+        _set(comp, "DTSTART", _to_ical_when(start, self.tz))
+        _set(comp, "DTEND", _to_ical_when(end, self.tz))
 
     def delete_event(self, calendar_id: str, event_id: str) -> None:
         with self._dav():
@@ -455,9 +458,11 @@ class CalDavBackend:
             id=str(comp.get("UID", "")),
             title=_text(comp, "SUMMARY") or "",
             notes=_text(comp, "DESCRIPTION"),
-            due=iso(_as_local(due)) if due is not None else None,
+            due=iso(_as_local(due, self.tz)) if due is not None else None,
             completed=status == "COMPLETED" or completed_at is not None,
-            completed_at=iso(_as_local(completed_at)) if completed_at is not None else None,
+            completed_at=(
+                iso(_as_local(completed_at, self.tz)) if completed_at is not None else None
+            ),
         )
 
     def list_task_lists(self) -> list[TaskListInfo]:

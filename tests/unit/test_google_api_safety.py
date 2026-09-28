@@ -1,6 +1,7 @@
 import json
 from datetime import date, datetime, timedelta
 from urllib.parse import parse_qs, urlparse
+from zoneinfo import ZoneInfo
 
 import httpx
 import pytest
@@ -8,7 +9,10 @@ import respx
 
 from postroom.google.api import CAL, TASKS, GoogleApi
 from postroom.mail.imap import AuthFailed
-from postroom.pim.models import TZ, EventInput, PimError, TaskInput
+from postroom.pim.models import EventInput, PimError, TaskInput
+
+# Any zone with a UTC offset and DST works; the server default is UTC.
+TZ = ZoneInfo("Europe/Berlin")
 
 EVENT = {
     "id": "e1",
@@ -35,7 +39,7 @@ class FakeOAuth:
 
 
 def _api(oauth=None):
-    return GoogleApi("me@gmail.com", oauth or FakeOAuth(), http=httpx.Client())
+    return GoogleApi("me@gmail.com", oauth or FakeOAuth(), http=httpx.Client(), tz=TZ)
 
 
 def _query(req) -> dict:
@@ -125,6 +129,8 @@ def test_list_events_reads_visible_calendars_merged_by_start():
     ]
     q = _query(mine.calls[0].request)
     assert q["singleEvents"] == ["true"] and q["orderBy"] == ["startTime"] and q["q"] == ["lu"]
+    # Event times come back in the server's configured zone.
+    assert q["timeZone"] == ["Europe/Berlin"] and q["timeMin"] == [start.isoformat()]
     assert work.called and not others.called
 
 
@@ -253,6 +259,6 @@ def test_switching_all_day_and_timed_nulls_the_other_keys():
     assert body["start"] == {
         "date": None,
         "dateTime": start.isoformat(),
-        "timeZone": "Europe/Prague",
+        "timeZone": "Europe/Berlin",
     }
     assert body["end"]["date"] is None

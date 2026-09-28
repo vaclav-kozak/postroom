@@ -6,6 +6,7 @@ from postroom.app import (
     build_mcp,
     build_services,
     create_app,
+    server_instructions,
 )
 from postroom.google.oauth import GoogleOAuth
 
@@ -50,7 +51,8 @@ def test_build_services_without_google(settings):
 
 async def test_build_mcp_registers_annotated_mail_tools(settings):
     mcp = build_mcp(build_services(settings))
-    assert mcp.name == "postroom" and mcp.instructions == SERVER_INSTRUCTIONS
+    assert mcp.name == "postroom" and mcp.instructions == server_instructions("UTC")
+    assert mcp.instructions.startswith(SERVER_INSTRUCTIONS)
     async with Client(mcp) as c:
         tools = {t.name: t for t in await c.list_tools()}
     assert set(tools) == READ_TOOLS | {"create_draft"} | ORGANIZE_TOOLS | SEND_TOOLS | PIM_TOOLS
@@ -103,6 +105,15 @@ def test_build_services_wires_pim(settings):
     s = build_services(settings)
     assert s.pim.repo is s.repo and s.pim.google is s.google
     assert "they never invite attendees" in SERVER_INSTRUCTIONS
+    assert "mailcow" not in SERVER_INSTRUCTIONS and "CalDAV/CardDAV" in SERVER_INSTRUCTIONS
+
+
+def test_time_zone_setting_reaches_pim_tools_and_instructions(settings):
+    settings.timezone = "America/New_York"
+    s = build_services(settings)
+    assert s.pim.tz.key == "America/New_York"
+    mcp = build_mcp(s)
+    assert "America/New_York" in mcp.instructions
 
 
 async def test_blocked_account_pim_call_is_not_contacted(settings):

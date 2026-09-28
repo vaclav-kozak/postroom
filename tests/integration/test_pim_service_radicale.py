@@ -1,11 +1,15 @@
 from datetime import datetime, timedelta
+from zoneinfo import ZoneInfo
 
 import pytest
 
 from postroom.accounts import AccountStatus, Provider
-from postroom.pim.models import TZ, EventInput, PimError, TaskInput
+from postroom.pim.models import EventInput, PimError, TaskInput
 from postroom.pim.service import PimService
 from tests.integration.conftest import DAV_PASS, DAV_USER
+
+# Any zone with a UTC offset and DST works; the server default is UTC.
+TZ = ZoneInfo("Europe/Berlin")
 
 pytestmark = pytest.mark.integration
 

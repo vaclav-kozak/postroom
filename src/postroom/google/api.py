@@ -19,13 +19,13 @@ Safety rules (see the PIM safety rules in the plan):
 import re
 from datetime import UTC, date, datetime, time
 from urllib.parse import quote
+from zoneinfo import ZoneInfo
 
 import httpx
 
 from postroom.google.oauth import GoogleOAuth, GoogleOAuthError
 from postroom.mail.imap import AuthFailed
 from postroom.pim.models import (
-    TZ,
     CalendarInfo,
     ContactInfo,
     EventInfo,
@@ -96,42 +96,42 @@ def _error_message(resp: httpx.Response) -> str:
     return msg[:300] if isinstance(msg, str) else ""
 
 
-def _rfc3339(value: datetime | date) -> str:
+def _rfc3339(value: datetime | date, tz: ZoneInfo) -> str:
     if isinstance(value, datetime):
-        return aware(value).isoformat()
-    return datetime.combine(value, time(), tzinfo=TZ).isoformat()
+        return aware(value, tz).isoformat()
+    return datetime.combine(value, time(), tzinfo=tz).isoformat()
 
 
-def _when(value: datetime | date) -> dict:
+def _when(value: datetime | date, tz: ZoneInfo) -> dict:
     if is_all_day(value):
         return {"date": value.isoformat()}
-    return {"dateTime": aware(value).isoformat(), "timeZone": "Europe/Prague"}
+    return {"dateTime": aware(value, tz).isoformat(), "timeZone": tz.key}
 
 
-def _patch_when(value: datetime | date) -> dict:
+def _patch_when(value: datetime | date, tz: ZoneInfo) -> dict:
     """`_when` for a PATCH: the other keys are nulled so all-day <-> timed switches work."""
-    return {"date": None, "dateTime": None, "timeZone": None, **_when(value)}
+    return {"date": None, "dateTime": None, "timeZone": None, **_when(value, tz)}
 
 
-def _parse_when(when: dict | None) -> datetime | date | None:
+def _parse_when(when: dict | None, tz: ZoneInfo) -> datetime | date | None:
     when = when or {}
     try:
         if when.get("date"):
             return date.fromisoformat(when["date"])
         if when.get("dateTime"):
-            return aware(datetime.fromisoformat(when["dateTime"]))
+            return aware(datetime.fromisoformat(when["dateTime"]), tz)
     except (TypeError, ValueError):
         return None
     return None
 
 
-def _sort_instant(when: dict | None) -> datetime:
-    value = _parse_when(when)
+def _sort_instant(when: dict | None, tz: ZoneInfo) -> datetime:
+    value = _parse_when(when, tz)
     if value is None:
         return datetime.max.replace(tzinfo=UTC)
     if isinstance(value, datetime):
         return value
-    return datetime.combine(value, time(), tzinfo=TZ)
+    return datetime.combine(value, time(), tzinfo=tz)
 
 
 def _if_match(item: dict) -> dict:
@@ -155,8 +155,17 @@ def _task_due(value: date) -> str:
 
 
 class GoogleApi:
-    def __init__(self, account: str, oauth: GoogleOAuth, http: httpx.Client | None = None):
+    def __init__(
+        self,
+        account: str,
+        oauth: GoogleOAuth,
+        http: httpx.Client | None = None,
+        tz: ZoneInfo | None = None,
+    ):
         self.account = account
+        # The server's configured time zone: naive times are read in it, new events carry
+        # it as their `timeZone` and listings are returned in it.
+        self.tz = tz or ZoneInfo("UTC")
         self._oauth = oauth
         self._owns_http = http is None
         self._http = http or httpx.Client(timeout=30)
@@ -299,8 +308,9 @@ class GoogleApi:
                 and it.get("accessRole") != "freeBusyReader"
             ]
         params = {
-            "timeMin": _rfc3339(start),
-            "timeMax": _rfc3339(end),
+            "timeMin": _rfc3339(start, self.tz),
+            "timeMax": _rfc3339(end, self.tz),
+            "timeZone": self.tz.key,
             "singleEvents": "true",
             "orderBy": "startTime",
             "maxResults": 250,
@@ -310,7 +320,9 @@ class GoogleApi:
         found: list[tuple[datetime, EventInfo]] = []
         for cal_id in cal_ids:
             for item in self._paged(f"{CAL}/calendars/{_cal(cal_id)}/events", params):
-                found.append((_sort_instant(item.get("start")), self._event_info(cal_id, item)))
+                found.append(
+                    (_sort_instant(item.get("start"), self.tz), self._event_info(cal_id, item))
+                )
         found.sort(key=lambda kv: kv[0])
         return [info for _, info in found[:MAX_ITEMS]]
 
@@ -318,10 +330,14 @@ class GoogleApi:
         if not data.title or data.start is None or data.end is None:
             raise PimError("title, start and end are required")
         try:
-            validate_range(data.start, data.end)
+            validate_range(data.start, data.end, self.tz)
         except ValueError as e:
             raise PimError(str(e)) from e
-        body: dict = {"summary": data.title, "start": _when(data.start), "end": _when(data.end)}
+        body: dict = {
+            "summary": data.title,
+            "start": _when(data.start, self.tz),
+            "end": _when(data.end, self.tz),
+        }
         if data.location:
             body["location"] = data.location
         if data.description:
@@ -359,14 +375,15 @@ class GoogleApi:
         if data.start is not None or data.end is not None:
             try:
                 start, end = rescheduled(
-                    _parse_when(item.get("start")),
-                    _parse_when(item.get("end")),
+                    _parse_when(item.get("start"), self.tz),
+                    _parse_when(item.get("end"), self.tz),
                     data.start,
                     data.end,
+                    self.tz,
                 )
             except ValueError as e:
                 raise PimError(str(e)) from e
-            patch["start"], patch["end"] = _patch_when(start), _patch_when(end)
+            patch["start"], patch["end"] = _patch_when(start, self.tz), _patch_when(end, self.tz)
         if not patch:
             return self._event_info(cal_id, item)
         updated = self._request(

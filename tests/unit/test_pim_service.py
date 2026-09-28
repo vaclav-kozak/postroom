@@ -1,5 +1,6 @@
 import time
 from datetime import datetime, timedelta
+from zoneinfo import ZoneInfo
 
 import httpx
 import pytest
@@ -9,8 +10,11 @@ from postroom.accounts import AccountStatus, Provider
 from postroom.dav.caldav_backend import CalDavBackend
 from postroom.dav.carddav import CardDavBackend
 from postroom.google.api import GoogleApi
-from postroom.pim.models import TZ, CalendarInfo, ContactInfo, EventInfo, EventInput, PimError
+from postroom.pim.models import CalendarInfo, ContactInfo, EventInfo, EventInput, PimError
 from postroom.pim.service import PimService
+
+# Any zone with a UTC offset and DST works; the server default is UTC.
+TZ = ZoneInfo("Europe/Berlin")
 
 
 class FakeBackend:
@@ -234,6 +238,15 @@ def test_default_factory_routes_contacts_and_google(repo):
     oauth = object()
     api = PimService(repo, oauth).backend(repo.get("g@gmail.com"), "calendar")
     assert isinstance(api, GoogleApi) and api._oauth is oauth
+    assert api.tz.key == "UTC"
+
+
+def test_backends_get_the_configured_time_zone(repo):
+    _imap(repo, "s@example.com", caldav_url=DAV)
+    repo.upsert(email="g@gmail.com", provider=Provider.GOOGLE, status=AccountStatus.CONNECTED)
+    svc = PimService(repo, object(), tz=TZ)
+    assert svc.backend(repo.get("s@example.com"), "calendar").tz is TZ
+    assert svc.backend(repo.get("g@gmail.com"), "calendar").tz is TZ
 
 
 @respx.mock
@@ -328,12 +341,18 @@ async def test_events_are_merged_by_start_and_backends_closed(repo):
         def close(self):
             closed.append(self.email)
 
-    svc = PimService(repo, None, backend_factory=lambda a, c: Dated(a.email))
+    svc = PimService(repo, None, backend_factory=lambda a, c: Dated(a.email), tz=TZ)
     start = datetime(2026, 10, 1, tzinfo=TZ)
     events, errors = await svc.list_events(None, None, start, start + timedelta(days=3), None)
-    # 23:30 UTC on 1 Oct is 01:30 Prague on 2 Oct: after the all-day event's midnight.
+    # 23:30 UTC on 1 Oct is 01:30 on 2 Oct in Berlin: after the all-day event's midnight.
     assert [e.id for e in events] == ["b-allday", "b-early", "a-late"] and errors == []
     assert sorted(closed) == ["a@example.com", "b@example.com"]
+
+    # In UTC (the default zone) the all-day event starts at 00:00 UTC on 2 Oct: after it.
+    closed.clear()
+    svc = PimService(repo, None, backend_factory=lambda a, c: Dated(a.email))
+    events, _ = await svc.list_events(None, None, start, start + timedelta(days=3), None)
+    assert [e.id for e in events] == ["b-early", "b-allday", "a-late"]
 
 
 async def test_search_contacts_caps_merged_results(repo):

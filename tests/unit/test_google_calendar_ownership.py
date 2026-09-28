@@ -7,13 +7,17 @@ account itself, as listed in the account's own calendarList.
 """
 
 from datetime import datetime, timedelta
+from zoneinfo import ZoneInfo
 
 import httpx
 import pytest
 import respx
 
 from postroom.google.api import CAL, GoogleApi
-from postroom.pim.models import TZ, EventInput, PimError
+from postroom.pim.models import EventInput, PimError
+
+# Any zone with a UTC offset and DST works; the server default is UTC.
+TZ = ZoneInfo("Europe/Berlin")
 
 ME = "me@gmail.com"
 OWN = "own123@group.calendar.google.com"
@@ -53,7 +57,7 @@ class FakeOAuth:
 
 
 def _api():
-    return GoogleApi(ME, FakeOAuth(), http=httpx.Client())
+    return GoogleApi(ME, FakeOAuth(), http=httpx.Client(), tz=TZ)
 
 
 def _data():

@@ -35,7 +35,7 @@
   <div class="panel-head">
     <div>
       <h2 id="accounts-title">Accounts</h2>
-      <p class="panel-sub">Mailboxes, calendars and contacts Claude can reach.</p>
+      <p class="panel-sub">Mailboxes, calendars and contacts Claude can reach.{% if tz %} Times are in {{ tz.key }}.{% endif %}</p>
     </div>
     {% if accounts %}
     <div class="panel-actions">

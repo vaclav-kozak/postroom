@@ -201,3 +201,23 @@ def test_set_access_all(monkeypatch, settings, capsys):
     assert cli.main(["set-access", "read"]) == 2
     assert cli.main(["set-access", "--all", "admin"]) == 2
     assert {a.mail_access for a in repo.list()} == {MailAccess.FULL}
+
+
+def test_invalid_setting_is_a_short_config_error(monkeypatch, settings, capsys):
+    _env(monkeypatch, settings)
+    monkeypatch.setenv("POSTROOM_TIMEZONE", "Mars/Olympus")
+    assert cli.main(["list-accounts"]) == 2
+    err = capsys.readouterr().err
+    assert "configuration error: POSTROOM_TIMEZONE: must be an IANA time zone" in err
+    assert "Traceback" not in err
+
+
+def test_config_error_never_prints_values(monkeypatch, capsys):
+    monkeypatch.delenv("POSTROOM_MASTER_KEY", raising=False)
+    monkeypatch.setenv("POSTROOM_SESSION_SECRET", "s3cr3t-value")
+    monkeypatch.setenv("POSTROOM_CHECK_INTERVAL_SECONDS", "not-a-number-s3cr3t")
+    assert cli.main(["list-accounts"]) == 2
+    err = capsys.readouterr().err
+    assert "POSTROOM_MASTER_KEY: Field required" in err
+    assert "POSTROOM_CHECK_INTERVAL_SECONDS" in err
+    assert "s3cr3t" not in err
